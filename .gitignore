@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Caches & local data
+.cache/
+cache/
+tmp/
+logs/
+*.log
+
+# Chroma / vector stores (لو عندك)
+chroma_db/
+chroma/
+*.parquet
+*.npy
+
+# Node (لو فيه)
+node_modules/
+
+# OS/editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Secrets
+.env
+env
+*.key
+*.pem
+
+# Zips & build artifacts
+*.zip
+dist/
+build/

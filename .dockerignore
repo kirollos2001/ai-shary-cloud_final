@@ -1,0 +1,11 @@
+.git
+__pycache__/
+*.pyc
+*.log
+*.tmp
+*.cache
+chroma_db/
+cache/
+env
+venv
+.venv
