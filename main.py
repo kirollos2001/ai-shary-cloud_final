@@ -580,7 +580,7 @@ if __name__ == "__main__":
     # The app will automatically initialize ChromaDB on startup
     # No need to upload chroma_db/ directory to cloud
     try:
-        port = int(os.environ.get("PORT", 5000))  # Google Cloud sets PORT environment variable
+        port = int(os.environ.get("PORT", 8080))  # Google Cloud sets PORT environment variable
         logging.info(f"🚀 Starting SharyAI on port {port} for Google Cloud deployment")
         app.run(host="0.0.0.0", port=port, debug=False)
     except Exception as e:
