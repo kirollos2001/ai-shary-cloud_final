@@ -4,9 +4,9 @@ import logging
 
 from config import get_db_connection
 
-CACHE_DIR = "cache"
+CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/cache")
 if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
+    os.makedirs(CACHE_DIR, exist_ok=True)
 
 def save_to_cache(filename, data):
     try:
@@ -254,5 +254,6 @@ def sync_conversations_to_db():
 
     save_to_cache("conversations_updates.json", [])
     logging.info(f"✅ Synced {len(convos)} conversations to DB and cleared conversations_updates.json")
+
 
 
