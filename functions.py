@@ -11,11 +11,7 @@ from datetime import datetime
 import json
 import variables
 
-EMAIL_HOST ='smtp.gmail.com'
-EMAIL_PORT =587
-EMAIL_USER ='Sharyai2025@gmail.com'
-EMAIL_PASSWORD ='quxi epbc ifyf javu'
-TEAM_EMAIL ='kirolloseisa2@gmail.com'
+from variables import EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, TEAM_EMAIL
 
 
 
@@ -214,6 +210,10 @@ def search_new_launches(arguments):
             semantic_parts.append(compound)
         
         query_text = " ".join(semantic_parts) if semantic_parts else "new launch properties"
+
+        # Small delay for better UX (wait message handled at API level)
+        import time
+        time.sleep(0.3)
 
         # Use RAG (Chroma) semantic search for new launches
         from chroma_rag_setup import RealEstateRAG
@@ -590,6 +590,37 @@ def property_search(arguments):
         bedrooms = arguments.get("bedrooms")
         bathrooms = arguments.get("bathrooms")
         apartment_area = arguments.get("apartment_area")
+        # Optional preferred compound (accept both 'compound' and 'compound_name')
+        compound_name = (arguments.get("compound") or arguments.get("compound_name") or "").strip()
+        
+        # Progressive search parameters
+        price_tolerance = arguments.get("price_tolerance", 0)  # 0%, 10%, 20%, 25%
+        excluded_ids = arguments.get("excluded_ids", [])  # IDs to exclude from results
+        search_round = arguments.get("search_round", 1)  # 1st, 2nd, or 3rd round
+
+        # Enforce required fields for existing units flow
+        missing_fields = []
+        if not location:
+            missing_fields.append("الموقع")
+        # Keep original value for validation before normalization
+        raw_budget = budget
+        if raw_budget in (None, "", 0):
+            missing_fields.append("الميزانية")
+        if not property_type:
+            missing_fields.append("نوع العقار")
+
+        if missing_fields:
+            return {
+                "source": "validation",
+                "message": "محتاج منك معلومات أساسية قبل ما أبدأ البحث: " + ", ".join(missing_fields) + ".\n" \
+                           + "- مثال للميزانية: 4,000,000 أو 4 مليون\n" \
+                           + "- ممكن كمان تقولّي كمبوند مفضل لو حابب (اختياري)",
+                "results": []
+            }
+        
+        # Small delay for better UX (wait message handled at API level)
+        import time
+        time.sleep(0.3)
         
         # Convert budget to float if it's a string
         try:
@@ -597,12 +628,25 @@ def property_search(arguments):
         except ValueError:
             budget = 0
         
+        # Apply price tolerance for progressive search
+        if price_tolerance > 0:
+            tolerance_factor = 1 + (price_tolerance / 100)
+            max_budget = budget * tolerance_factor
+            min_budget = budget / tolerance_factor
+        else:
+            # First search: 10% tolerance
+            tolerance_factor = 1.1  # 10%
+            max_budget = budget * tolerance_factor
+            min_budget = budget / tolerance_factor
+        
         # Build search query for ChromaDB semantic search
         search_query_parts = []
         if location:
             search_query_parts.append(f"location: {location}")
         if property_type:
             search_query_parts.append(f"property type: {property_type}")
+        if compound_name:
+            search_query_parts.append(f"compound: {compound_name}")
         if budget > 0:
             search_query_parts.append(f"budget around {budget}")
         if bedrooms:
@@ -637,13 +681,15 @@ def property_search(arguments):
                         filters["price_min"] = min_val
                         filters["price_max"] = max_val
                 else:
-                    filters["price_min"] = int(budget * 0.9)
-                    filters["price_max"] = int(budget * 1.1)
+                    filters["price_min"] = int(min_budget)
+                    filters["price_max"] = int(max_budget)
             # Pass semantic hints for reranker (not used in Chroma where clause)
             if location:
                 filters["query_location"] = location
             if property_type:
                 filters["query_property_type"] = property_type
+            if compound_name:
+                filters["query_compound"] = compound_name
             
             # Perform semantic search using ChromaDB with MMR
             # Get more results initially for MMR processing
@@ -651,8 +697,10 @@ def property_search(arguments):
             
             if not initial_results:
                 return {
-                    "source": "chromadb_semantic_search",
-                    "message": "❌ لا توجد وحدات مطابقة لمواصفاتك.",
+                    "source": "no_relevant_results",
+                    "message": "آسف يا فندم، مش لاقي وحدات مطابقة للمواصفات اللي طلبتها في الوقت الحالي.\n\n" \
+                               "تقدر تتواصل مع فريق المبيعات مباشرة للحصول على أحدث العروض المتاحة:\n" \
+                               "📱 واتساب: https://wa.me/201000730208",
                     "results": []
                 }
             
@@ -700,18 +748,25 @@ def property_search(arguments):
                             min_val = int(range_match.group(1)) * 1_000_000
                             max_val = int(range_match.group(2)) * 1_000_000
                             return min_val <= price <= max_val
-                    # Single value with 10% tolerance
-                    return budget * 0.9 <= price <= budget * 1.1
+                    # Use dynamic tolerance based on search round
+                    return min_budget <= price <= max_budget
                 except Exception:
                     return False
             
             for item in diversified_results:
+                # Exclude previously shown units for progressive search
+                item_id = str(item.get('id', ''))
+                if item_id in excluded_ids:
+                    continue
+                
                 # Apply price filtering since client needs specific budget
                 if budget and budget > 0:
                     if not check_price_match(budget, arguments, item):
                         continue
-                
-                # Rely on semantic similarity for other attributes
+
+                # Location and property type matching is handled by semantic search (embeddings)
+                # No additional filtering needed as ChromaDB's semantic search handles this accurately
+
                 filtered_results.append(item)
             
             # -------------------- Format Results for UI --------------------
@@ -732,20 +787,54 @@ def property_search(arguments):
             
             if not filtered_results:
                 return {
-                    "source": "chromadb_semantic_search",
-                    "message": f"❌ للأسف، ملقتش {property_type or 'وحدات'} في {location or 'المناطق المطلوبة'} تناسب مواصفاتك.",
+                    "source": "no_relevant_results",
+                    "message": "آسف يا فندم، مش لاقي وحدات مطابقة للمواصفات اللي طلبتها في الوقت الحالي.\n\n" \
+                               "تقدر تتواصل مع فريق المبيعات مباشرة للحصول على أحدث العروض المتاحة:\n" \
+                               "📱 واتساب: https://wa.me/201000730208",
+                    "results": []
+                }
+            
+            # Quality check: Ensure results are truly relevant
+            quality_filtered_results = []
+            for result in filtered_results:
+                # Check if result has minimum quality indicators
+                result_text = str(result.get('name_ar', '') or result.get('name_en', '') or result.get('document', '')).lower()
+                
+                # Location quality check - must contain location reference
+                location_match = False
+                if location:
+                    location_terms = [location.lower(), location.replace('ال', '').lower()]
+                    location_match = any(term in result_text for term in location_terms if term)
+                else:
+                    location_match = True  # No location specified, skip check
+                
+                # Price quality check - must be reasonable
+                price_match = True  # We already filtered by price earlier
+                
+                # Only include if quality checks pass
+                if location_match and price_match:
+                    quality_filtered_results.append(result)
+            
+            # Final quality check: If we have very few quality results, apologize instead
+            if len(quality_filtered_results) < 3:
+                return {
+                    "source": "low_quality_results",
+                    "message": "آسف يا فندم، مش لاقي وحدات كافية تطابق مواصفاتك بدقة في الوقت الحالي.\n\n" \
+                               "تقدر تتواصل مع فريق المبيعات مباشرة للحصول على أحدث العروض المتاحة:\n" \
+                               "📱 واتساب: https://wa.me/201000730208",
                     "results": []
                 }
             
             # Prepare formatted list (max 10)
-            formatted_lines = [format_unit(itm, i+1) for i, itm in enumerate(filtered_results[:10])]
+            formatted_lines = [format_unit(itm, i+1) for i, itm in enumerate(quality_filtered_results[:10])]
             intro_msg = (
-                f"أهلاً بيك يا فندم، تمام جداً! لقيتلك {property_type or 'شقق'} ممتازة في {location if location else 'المنطقة المطلوبة'}، "
-                "في حدود ميزانيتك وعدد الغرف والحمامات اللي حضرتك طلبته 👇"
+                f"👋 أهلاً بحضرتك!\nلقيتلك وحدات مناسبة في {location if location else 'المنطقة المطلوبة'}"
+                + (f" داخل كمبوند {compound_name}" if compound_name else " داخل كمبوندات مختلفة")
+                + "، وفي حدود ميزانيتك وعدد الغرف والحمامات اللي طلبتهم 👇"
             )
             # Compute similarity-like scores from chroma distance (not shown in UI)
             similarity_scores = []
-            for itm in filtered_results[:10]:
+            for itm in quality_filtered_results[:10]:
                 try:
                     dist = float(itm.get('chroma_score', 0))
                     sim = 1.0 - dist
@@ -757,13 +846,46 @@ def property_search(arguments):
                 except Exception:
                     similarity_scores.append(None)
             
+                # Progressive search follow-up message
+                if search_round == 1:
+                    follow_up_msg = "✨ \"تحب أوريك تفاصيل أكتر عن وحدة معينة؟ ابعتلي رقم الـID اللي شد انتباهك 🔍\nأو تحب أعرضلك خيارات إضافية من الوحدات المتاحة؟ (مرونة السعر +10%)\""
+                elif search_round == 2:
+                    follow_up_msg = "✨ \"تحب أوريك تفاصيل أكتر عن وحدة معينة؟ ابعتلي رقم الـID اللي شد انتباهك 🔍\nأو تحب أعرضلك المزيد من الخيارات؟ (بحث بمرونة أكبر في السعر +20%)\""
+                else:
+                    follow_up_msg = "✨ \"تحب أوريك تفاصيل أكتر عن وحدة معينة؟ ابعتلي رقم الـID اللي شد انتباهك 🔍\nأو تحب أعرضلك المزيد من الخيارات؟ (بحث نهائي بمرونة +25%)\""
+                # Store search parameters in session for progressive search (first round only)
+                if search_round == 1:
+                    import config
+                    session_id_for_storage = arguments.get('session_id', 'default')
+                    session_key = f"{session_id_for_storage}_search_history"
+                    shown_ids = [str(item.get('id', '')) for item in quality_filtered_results[:10]]
+                    
+                    # Debug: Print session storage
+                    logging.info(f"💾 Storing search history with session_id: {session_id_for_storage}")
+                    logging.info(f"💾 Session key: {session_key}")
+                    logging.info(f"💾 Shown IDs: {shown_ids[:5]}...")
+                    
+                    config.client_sessions[session_key] = {
+                        "last_search_params": {
+                            "location": location,
+                            "budget": budget,
+                            "property_type": property_type,
+                            "bedrooms": bedrooms,
+                            "bathrooms": bathrooms,
+                            "compound_name": compound_name,
+                            "session_id": arguments.get('session_id', 'default')
+                        },
+                        "search_round": 1,
+                        "shown_ids": shown_ids
+                    }
+                
                 return {
                     "source": "chromadb_semantic_search_mmr",
-                "message": intro_msg,
-                "results": formatted_lines,
-                "follow_up": "تحب أعرضلك تفاصيل أكتر عن واحدة منهم؟ ابعتلي رقم الوحدة اللي عجبتك 🔍",
-                "similarity_scores": similarity_scores
-            }
+                    "message": intro_msg,
+                    "results": formatted_lines,
+                    "follow_up": follow_up_msg,
+                    "similarity_scores": similarity_scores
+                }
             
         except ImportError as e:
             print(f"🚨 Error importing ChromaDB RAG: {e}")
@@ -1073,6 +1195,50 @@ def classify_query_type_by_keywords(user_query):
     
     return "unspecified"
 
+def classify_insight_intent_llm(user_query: str) -> str:
+    """
+    Use LLM to classify non-explicit insight questions into:
+    - average_price
+    - compound_list
+    - cheapest_unit
+    - other
+    """
+    try:
+        import os
+        import google.generativeai as genai
+        model_name = variables.GEMINI_MODEL_NAME
+        api_key = os.environ.get('GEMINI_API_KEY') or variables.GEMINI_API_KEY
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+
+        prompt = f"""
+        صنّف السؤال التالي إلى واحدة فقط من الفئات:
+        - average_price: إذا كان يسأل عن متوسط الأسعار
+        - compound_list: إذا كان يسأل عن أسماء/قائمة الكمبوندات
+        - cheapest_unit: إذا كان يسأل عن الأرخص
+        - other: غير ذلك
+
+        السؤال: "{user_query}"
+
+        أعد الإجابة بكلمة واحدة فقط من الخيارات: average_price أو compound_list أو cheapest_unit أو other
+        """
+        resp = model.generate_content(prompt)
+        text = (resp.text or '').strip().lower()
+        for label in ["average_price", "compound_list", "cheapest_unit", "other"]:
+            if label in text:
+                return label
+        return "other"
+    except Exception:
+        # Fallback: conservative default
+        uq = user_query.lower()
+        if "متوسط" in uq or "average" in uq:
+            return "average_price"
+        if "كمبوند" in uq or "compound" in uq or "الكومبوند" in uq:
+            return "compound_list"
+        if "ارخص" in uq or "الأرخص" in uq or "الارخص" in uq or "cheapest" in uq:
+            return "cheapest_unit"
+        return "other"
+
 def route_property_search(user_query, search_arguments):
     """
     Route property search to appropriate data source based on LLM classification.
@@ -1190,6 +1356,240 @@ def smart_property_search(user_query, search_arguments):
             "source": "smart_search"
         }
 
+
+def insight_search(arguments):
+    """
+    Answer non-explicit queries (statistics, lists, availability) strictly from ChromaDB data.
+    Strategy: Retrieve ALL available data first, then let LLM analyze and filter insights.
+    No hallucinations. If zero data, apologize and include WhatsApp link.
+    """
+    try:
+        query_text = arguments.get("query", "")
+        location = (arguments.get("location") or "").strip()
+        property_type = (arguments.get("property_type") or "").strip()
+
+        # Prefer LLM-based extraction of preferences over rigid keywords
+        if not location or not property_type:
+            try:
+                llm_prefs = extract_client_preferences_llm(
+                    user_message=query_text,
+                    conversation_history=None,
+                    current_preferences=None,
+                    conversation_path="available_units"
+                )
+                if not property_type:
+                    property_type = llm_prefs.get("property_type", "").strip()
+                if not location:
+                    location = llm_prefs.get("location", "").strip()
+            except Exception:
+                pass
+
+        from chroma_rag_setup import RealEstateRAG
+        rag = RealEstateRAG()
+
+        # Strategy: Retrieve ALL available data first with broad search
+        # Then let LLM analyze and filter the results
+        
+        # Build broader semantic query to get maximum relevant data
+        semantic_parts = []
+        if property_type:
+            semantic_parts.append(property_type)
+        if location:
+            semantic_parts.append(location)
+        semantic_q = " ".join(semantic_parts) if semantic_parts else query_text
+
+        # Retrieve maximum data with minimal filters to get complete dataset
+        # Use broader fetch to ensure we don't miss relevant data
+        results = rag.search_units(semantic_q, n_results=2000, filters={})
+        
+        # Also try new launches for completeness
+        launches = rag.search_new_launches(semantic_q, n_results=2000, filters={})
+
+        # Combine all data for comprehensive analysis
+        all_data = results + launches
+
+        # No data at all => apologize with WhatsApp
+        if not all_data:
+            return {
+                "source": "insight",
+                "message": "آسف يا فندم، مش لاقي بيانات مطابقة في النظام حالياً. تقدر تتواصل فوراً مع خدمة العملاء على واتساب: https://wa.me/201000730208",
+                "results": []
+            }
+
+        # Now filter the retrieved data based on location/property_type if specified
+        if location or property_type:
+            filtered_results = []
+            for item in all_data:
+                metadata = item.get('metadata', {})
+                doc = item.get('document', '').lower()
+                
+                # Check if location matches (in document or metadata)
+                location_match = True
+                if location:
+                    loc_lower = location.lower()
+                    location_match = (
+                        loc_lower in doc or
+                        loc_lower in str(metadata.get('location', '')).lower() or
+                        loc_lower in str(metadata.get('city', '')).lower()
+                    )
+                
+                # Check if property type matches
+                type_match = True
+                if property_type:
+                    type_lower = property_type.lower()
+                    type_match = (
+                        type_lower in doc or
+                        type_lower in str(metadata.get('property_type', '')).lower()
+                    )
+                
+                if location_match and type_match:
+                    filtered_results.append(item)
+            
+            # Use filtered results for analysis
+            results = filtered_results
+        else:
+            # Use all retrieved data
+            results = all_data
+
+        # If no results after filtering, apologize
+        if not results:
+            return {
+                "source": "insight",
+                "message": "آسف يا فندم، مش لاقي بيانات مطابقة للموقع أو النوع المطلوب. تقدر تتواصل فوراً مع خدمة العملاء على واتساب: https://wa.me/201000730208",
+                "results": []
+            }
+
+        # Classify insight intent via LLM
+        intent = classify_insight_intent_llm(query_text)
+
+        # 1) Average price query
+        if intent == "average_price":
+            prices = []
+            for r in results:
+                meta = r.get('metadata', {})
+                price = meta.get('price_value')
+                try:
+                    if price is not None:
+                        prices.append(float(price))
+                except Exception:
+                    continue
+            if not prices:
+                return {
+                    "source": "insight",
+                    "message": "آسف يا فندم، مش لاقيت أسعار كافية لحساب المتوسط. تقدر تتواصل على واتساب: https://wa.me/201000730208",
+                    "results": []
+                }
+            avg_price = int(sum(prices) / len(prices))
+            return {
+                "source": "insight",
+                "message": f"📊 متوسط الأسعار{' للشقق' if 'شقة' in property_type else ''} في {location or 'المنطقة المحددة'} حوالي {avg_price:,} جنيه.",
+                "results": []
+            }
+
+        # 2) Compounds list query
+        if intent == "compound_list":
+            compounds = []
+            seen = set()
+            # Collect all compounds from filtered results
+            for r in results:
+                meta = r.get('metadata', {})
+                comp = meta.get('compound_name') or meta.get('compound_name_ar')
+                if comp and comp not in seen:
+                    seen.add(comp)
+                    compounds.append(comp)
+            
+            if not compounds:
+                return {
+                    "source": "insight",
+                    "message": "آسف يا فندم، مش لاقي كومبوندات في المنطقة المطلوبة حالياً. تواصل واتساب: https://wa.me/201000730208",
+                    "results": []
+                }
+            
+            # If data is massive (>15 compounds), provide a sample with note
+            if len(compounds) > 15:
+                sample_compounds = compounds[:15]
+                return {
+                    "source": "insight",
+                    "message": f"🏘️ عينة من الكومبوندات المتاحة في {location or 'المنطقة المطلوبة'} (المجموع: {len(compounds)} كمبوند):",
+                    "results": sample_compounds + [f"... وعدد {len(compounds) - 15} كمبوند إضافي. للقائمة الكاملة تواصل معنا."]
+                }
+            else:
+                return {
+                    "source": "insight",
+                    "message": f"🏘️ الكومبوندات المتاحة في {location or 'المنطقة المطلوبة'} ({len(compounds)} كمبوند):",
+                    "results": compounds
+                }
+
+        # 3) Cheapest unit query
+        if intent == "cheapest_unit":
+            cheapest = None
+            cheapest_price = None
+            for r in results:
+                meta = r.get('metadata', {})
+                price = meta.get('price_value')
+                try:
+                    if price is not None:
+                        p = float(price)
+                        if cheapest_price is None or p < cheapest_price:
+                            cheapest_price = p
+                            cheapest = r
+                except Exception:
+                    continue
+            if not cheapest:
+                return {
+                    "source": "insight",
+                    "message": "آسف يا فندم، مش لاقيت وحدات بأسعار واضحة. تقدر تتواصل على واتساب: https://wa.me/201000730208",
+                    "results": []
+                }
+            meta = cheapest.get('metadata', {})
+            unit_id = meta.get('unit_id', 'غير متوفر')
+            doc = cheapest.get('document', '')
+            name_ar = ""
+            if 'Name (AR):' in doc:
+                try:
+                    name_ar = doc.split('Name (AR):')[1].split('\n')[0].strip()
+                except Exception:
+                    name_ar = doc.split('\n')[0][:120]
+            else:
+                name_ar = doc.split('\n')[0][:120]
+            price_val = int(cheapest_price) if cheapest_price is not None else 0
+            line = f"ID:{unit_id} | {name_ar} | السعر: {price_val:,} EGP"
+            return {
+                "source": "insight",
+                "message": f"✅ أرخص وحدة مطابقة في {location or 'المنطقة المطلوبة'}:",
+                "results": [line]
+            }
+
+        # Fallback: return sample of items as insight results without fabrication
+        # For massive data sets, provide a representative sample
+        sample_size = min(10, len(results))
+        lines = []
+        for i, r in enumerate(results[:sample_size]):
+            meta = r.get('metadata', {})
+            doc = r.get('document', '')
+            unit_id = meta.get('unit_id', 'غير متوفر')
+            name = doc.split('\n')[0][:120] if doc else 'غير متوفر'
+            price = meta.get('price_value', 'غير متوفر')
+            price_s = f"{int(price):,}" if isinstance(price, (int, float)) else str(price)
+            lines.append(f"{i+1}. ID:{unit_id} | {name} | السعر: {price_s}")
+        
+        # Add note if there are more results
+        message = f"🔍 عينة من الوحدات المتاحة (المجموع: {len(results)} وحدة):"
+        if len(results) > sample_size:
+            lines.append(f"... وعدد {len(results) - sample_size} وحدة إضافية. للمزيد تواصل معنا.")
+        
+        return {
+            "source": "insight",
+            "message": message,
+            "results": lines
+        }
+
+    except Exception as e:
+        print(f"🚨 Error in insight_search: {e}")
+        return {
+            "error": f"❌ حصل خطأ أثناء معالجة الاستفسار: {str(e)}"
+        }
+
 def extract_client_preferences_llm(user_message, conversation_history=None, current_preferences=None, conversation_path=None):
     """
     Intelligently extract client preferences using LLM, maintaining state across conversation turns.
@@ -1243,6 +1643,7 @@ def extract_client_preferences_llm(user_message, conversation_history=None, curr
             - نوع العقار (إلزامي)
             - الموقع (إلزامي)
             - الميزانية (إلزامي)
+            - اسم الكمبوند المفضل (اختياري)
             - عدد الغرف (اختياري)
             - عدد الحمامات (اختياري)
             - نوع الاستلام (اختياري)
@@ -1707,6 +2108,124 @@ def _cosine_similarity(vec1, vec2):
     return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
 
 
+def get_more_units(arguments):
+    """
+    Get more units with increased price tolerance for progressive search.
+    This is only for existing units, not new launches.
+    """
+    try:
+        # Get the session ID to retrieve previous search parameters
+        session_id = arguments.get("session_id", "")
+        
+        if not session_id:
+            return {
+                "source": "error",
+                "message": "❌ خطأ: لم يتم العثور على بيانات الجلسة",
+                "results": []
+            }
+        
+        # Try to get previous search parameters from session
+        import config
+        session_key = f"{session_id}_search_history"
+        session_data = config.client_sessions.get(session_key)
+        
+        # Debug: Print available session keys
+        logging.info(f"🔍 Looking for session key: {session_key}")
+        logging.info(f"🔍 Available session keys: {list(config.client_sessions.keys())}")
+        
+        if not session_data:
+            # Try alternative session key formats
+            # 1. Look for any key containing parts of the session_id
+            session_parts = session_id.replace("session_", "").split("_")
+            alternative_keys = []
+            
+            for key in config.client_sessions.keys():
+                if "search_history" in key:
+                    # Check if any part of the session matches
+                    key_parts = key.replace("session_", "").split("_")
+                    if any(part in key_parts for part in session_parts if part and len(part) > 4):
+                        alternative_keys.append(key)
+            
+            # 2. If no partial match, try the most recent search_history key
+            if not alternative_keys:
+                search_history_keys = [key for key in config.client_sessions.keys() if "search_history" in key]
+                if search_history_keys:
+                    # Sort by key (assuming newer sessions have later timestamps)
+                    alternative_keys = sorted(search_history_keys, reverse=True)[:1]
+            
+            if alternative_keys:
+                session_key = alternative_keys[0]
+                session_data = config.client_sessions.get(session_key)
+                logging.info(f"🔍 Found alternative session key: {session_key}")
+                logging.info(f"🔍 Original session_id: {session_id}")
+                logging.info(f"🔍 All search_history keys: {[k for k in config.client_sessions.keys() if 'search_history' in k]}")
+            
+        if not session_data:
+            return {
+                "source": "error", 
+                "message": f"❌ لم أتمكن من العثور على معايير البحث السابقة. Session ID: {session_id}. يرجى إعادة البحث من البداية.",
+                "results": []
+            }
+        
+        # Get previous search parameters and round
+        previous_params = session_data.get("last_search_params", {})
+        current_round = session_data.get("search_round", 1) + 1
+        shown_ids = session_data.get("shown_ids", [])
+        
+        if current_round > 3:
+            return {
+                "source": "max_rounds_reached",
+                "message": "تم عرض جميع الخيارات المتاحة بمختلف مستويات مرونة السعر. تحب تبدأ بحث جديد بمعايير مختلفة؟",
+                "results": []
+            }
+        
+        # Set price tolerance based on round
+        # Round 1: 10%, Round 2: 20%, Round 3: 25%
+        tolerance_map = {2: 20, 3: 25}
+        price_tolerance = tolerance_map.get(current_round, 25)
+        
+        # Update search parameters for progressive search
+        new_params = previous_params.copy()
+        new_params.update({
+            "price_tolerance": price_tolerance,
+            "excluded_ids": shown_ids,
+            "search_round": current_round
+        })
+        
+        # Call property_search with updated parameters
+        result = property_search(new_params)
+        
+        # Update session with new results
+        if result.get("results"):
+            # Handle both string and dict formats for results
+            new_ids = []
+            for item in result.get("results", []):
+                if isinstance(item, dict):
+                    new_ids.append(str(item.get('id', '')))
+                elif isinstance(item, str):
+                    import re
+                    id_match = re.search(r'ID:(\d+)', item)
+                    if id_match:
+                        new_ids.append(id_match.group(1))
+            
+            new_shown_ids = shown_ids + new_ids
+            session_data.update({
+                "search_round": current_round,
+                "shown_ids": new_shown_ids,
+                "last_search_params": previous_params  # Keep original params
+            })
+            config.client_sessions[f"{session_id}_search_history"] = session_data
+        
+        return result
+        
+    except Exception as e:
+        logging.error(f"Error in get_more_units: {e}")
+        return {
+            "source": "error",
+            "message": f"❌ خطأ في البحث عن وحدات إضافية: {str(e)}",
+            "results": []
+        }
+
 def get_unit_details(arguments):
     """
     Get detailed information about a specific unit by ID.
@@ -1767,17 +2286,25 @@ def get_unit_details(arguments):
                 
                 formatted_details = f"""
 تفاصيل الوحدة:
-📍 **اسم الوحدة:** {name_ar}
-📝 **الوصف:** {desc_ar}
+📍 اسم الوحدة: {name_ar}
+📝 الوصف: {desc_ar}
 
-📌 **الكومباوند:** {compound_name}
-property_type_name: {property_type_name}
-city_name: {city_name}
+📌 الكومباوند: {compound_name}
+🏷️ النوع: {property_type_name}
+🌆 الموقع: {city_name}
 
 🖼️ **صورة العقار:** {new_image}
 
-تحب احجزلك zoom meeting مع السيلز المطور عشان تعرف تفاصيل اكتر او عروض
-ملحوظة * لا توجد زيارة ميدانية حاليا متاحة للنوعية دي من المشاريع و بالنسبة لباقي التفاصيل مثل الاسعار ,المساحة وخلافه غير متوفر حاليا لكن ممكن تتواصل مع سيلز المطور عشان تعرف تفاصيل اكتر من خلال zoom meeting
+
+ℹ️ ملاحظات هامة
+
+❌ لا توجد زيارة ميدانية حاليًا لهذا المشروع.
+
+ℹ️ تفاصيل مثل الأسعار، المساحات، وأنظمة الدفع غير متوفرة الآن.
+
+🎯 الخطوة التالية
+
+تحب أحجزلك Zoom Meeting مع سيلز المطور عشان تعرف تفاصيل أكتر عن العروض المتاحة؟
 """
                 return {
                     "unit_type": "new_launch",
