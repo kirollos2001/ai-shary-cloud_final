@@ -409,7 +409,7 @@ Address: {city_name}
                     
                     if embeddings and len(embeddings) > 0:
                         # Apply MMR for diversity
-                        mmr_indices = mmr(query_embedding, embeddings, k=min(n_results, len(embeddings)), lambda_param=0.7)
+                        mmr_indices = mmr(query_embedding, embeddings, k=min(n_results, len(embeddings)), lambda_param=0.9)
                         
                         # Return MMR-optimized results
                         mmr_results = []
@@ -496,7 +496,7 @@ Address: {city_name}
                     if embeddings is not None and len(embeddings) > 0:
                         # Apply MMR algorithm for optimal diversity
                         from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=50, lambda_param=0.6)  # Increased k to 50 for more results
+                        mmr_indices = mmr(query_embedding, embeddings, k=50, lambda_param=0.9)  # Favor relevance over diversity
                         logger.info(f"✅ MMR selected {len(mmr_indices)} indices: {mmr_indices}")
                         
                         # Get MMR-optimized results
@@ -736,7 +736,7 @@ Address: {city_name}
                     if embeddings is not None and len(embeddings) > 0:
                         # Apply MMR algorithm for optimal diversity
                         from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=50, lambda_param=0.6)  # Increased k to 50 for more results
+                        mmr_indices = mmr(query_embedding, embeddings, k=50, lambda_param=0.8)  # Increased k to 50 for more results
                         
                         # Get MMR-optimized results
                         mmr_results = []
