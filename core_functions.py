@@ -194,14 +194,34 @@ async def process_gemini_response_async(model, user_message, session_id=None):
                         logging.info(f"🔧 Automatic function call detected: {function_name}")
                         logging.info(f"🔧 Function arguments: {function_args}")
                         
+                        # Send "please wait" message for search functions
+                        if function_name in ["property_search", "search_new_launches", "insight_search"]:
+                            wait_message = "✨ من فضلك يا فندم، اديني لحظات أراجع البيانات وأجيبلك أنسب الوحدات."
+                            if function_name == "search_new_launches":
+                                wait_message = "✨ من فضلك يا فندم، اديني لحظات أراجع البيانات وأجيبلك أنسب الإطلاقات الجديدة."
+                            elif function_name == "insight_search":
+                                wait_message = "✨ من فضلك يا فندم، اديني لحظات أراجع البيانات وأجيبلك المعلومات المطلوبة."
+                            
+                            # Return the wait message first
+                            return {
+                                "wait_message": wait_message,
+                                "function_name": function_name,
+                                "function_args": dict(function_args),
+                                "continue_search": True
+                            }
+                        
                         try:
                             # Execute the function
                             function_to_call = getattr(functions, function_name)
-                            
+
                             # Add session_id to arguments if needed
                             if function_name == "schedule_viewing" and session_id:
                                 function_args["conversation_id"] = session_id
                             
+                            # Add session_id for get_more_units
+                            if function_name == "get_more_units" and session_id:
+                                function_args["session_id"] = session_id
+
                             # Add client info for scheduling
                             if function_name == "schedule_viewing":
                                 client_info = config.client_sessions.get(session_id, {})
@@ -211,7 +231,41 @@ async def process_gemini_response_async(model, user_message, session_id=None):
                                     "phone": client_info.get("phone", "Not Provided"),
                                     "email": client_info.get("email", "Not Provided")
                                 })
-                            
+
+                            # Augment property_search with compound from conversation preferences when missing
+                            if function_name == "property_search":
+                                # Add session_id for progressive search
+                                if session_id and not function_args.get("session_id"):
+                                    function_args["session_id"] = session_id
+                                
+                                try:
+                                    client_info = config.client_sessions.get(session_id, {})
+                                    user_id = client_info.get("user_id")
+                                    if user_id:
+                                        prefs = functions.get_conversation_preferences(session_id, user_id)
+                                        compound_pref = (
+                                            prefs.get("compound_name")
+                                            or prefs.get("compound")
+                                        )
+                                        if compound_pref and not function_args.get("compound") and not function_args.get("compound_name"):
+                                            function_args["compound"] = compound_pref
+                                except Exception as _e:
+                                    logging.warning(f"Could not augment property_search with compound: {_e}")
+
+                            # For insight queries: ensure we pass inferred location/type if present in context
+                            if function_name == "insight_search":
+                                try:
+                                    client_info = config.client_sessions.get(session_id, {})
+                                    user_id = client_info.get("user_id")
+                                    if user_id:
+                                        prefs = functions.get_conversation_preferences(session_id, user_id)
+                                        if prefs.get("location") and not function_args.get("location"):
+                                            function_args["location"] = prefs.get("location")
+                                        if prefs.get("property_type") and not function_args.get("property_type"):
+                                            function_args["property_type"] = prefs.get("property_type")
+                                except Exception as _e:
+                                    logging.warning(f"Could not augment insight_search with context: {_e}")
+
                             output = function_to_call(function_args)
                             logging.info(f"✅ Function {function_name} executed successfully!")
                             
