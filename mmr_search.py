@@ -13,7 +13,7 @@ def cosine_similarity(vec1, vec2):
         return 0.0
     return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
 
-def mmr(query_embedding, doc_embeddings, k=10, lambda_param=0.8):
+def mmr(query_embedding, doc_embeddings, k=10, lambda_param=0.9):
     """
     Maximal Marginal Relevance (MMR) for result diversification.
     Args:
