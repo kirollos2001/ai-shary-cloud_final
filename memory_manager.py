@@ -1,293 +1,222 @@
-import os
-import re
-import json
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage, AIMessage
-from pydantic import Field
-import variables
+import numpy as np
+from typing import List, Dict, Any, Callable
+import google.generativeai as genai
+import logging
 
-# Set Gemini API key
-os.environ["GEMINI_API_KEY"] = variables.GEMINI_API_KEY
+logger = logging.getLogger(__name__)
 
-# Initialize Gemini model
-llm = ChatGoogleGenerativeAI(
-    model=variables.GEMINI_MODEL_NAME,
-    google_api_key=variables.GEMINI_API_KEY,
-    temperature=0.7
-)
+# --- MMR Implementation ---
+def cosine_similarity(vec1, vec2):
+    vec1 = np.array(vec1)
+    vec2 = np.array(vec2)
+    if np.linalg.norm(vec1) == 0 or np.linalg.norm(vec2) == 0:
+        return 0.0
+    return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
 
-class ConversationSummaryMemory:
-    """Custom conversation summary memory using LangChain 0.3.x API"""
+def mmr(query_embedding, doc_embeddings, k=10, lambda_param=0.9):
+    """
+    Maximal Marginal Relevance (MMR) for result diversification.
+    Args:
+        query_embedding: Embedding of the query
+        doc_embeddings: List of embeddings for candidate documents
+        k: Number of results to return
+        lambda_param: Trade-off between relevance and diversity
+    Returns:
+        List of selected indices
+    """
+    selected = []
+    candidates = list(range(len(doc_embeddings)))
     
-    def __init__(self, llm, max_token_limit=500):
-        self.llm = llm
-        self.max_token_limit = max_token_limit
-        self.buffer = []
-        
-        self.summary_prompt = PromptTemplate(
-            input_variables=["summary", "new_lines"],
-            template="Summarize the following conversation in 50 words or less:\n\n{summary}\n\n{new_lines}"
-        )
-        
-        self.summary_chain = self.summary_prompt | self.llm | StrOutputParser()
+    # Compute similarity to query for all docs
+    sim_to_query = [cosine_similarity(query_embedding, emb) for emb in doc_embeddings]
     
-    @property
-    def memory_variables(self):
-        return ["history"]
-    
-    def load_memory_variables(self, inputs):
-        if not self.buffer:
-            return {"history": ""}
-        
-        # Create summary from buffer
-        conversation_text = "\n".join([
-            f"Human: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}"
-            for msg in self.buffer
-        ])
-        
-        try:
-            summary = self.summary_chain.invoke({
-                "summary": "",
-                "new_lines": conversation_text
-            })
-            return {"history": summary}
-        except Exception as e:
-            print(f"Error generating summary: {e}")
-            return {"history": conversation_text}
-    
-    def save_context(self, inputs, outputs):
-        user_input = inputs.get("input", "")
-        ai_output = outputs.get("output", outputs.get("response", ""))
-        
-        self.buffer.append(HumanMessage(content=user_input))
-        self.buffer.append(AIMessage(content=ai_output))
-        
-        # Keep buffer within token limit (rough estimation)
-        if len(self.buffer) > 20:  # Simple limit
-            self.buffer = self.buffer[-20:]
-    
-    def clear(self):
-        self.buffer.clear()
-
-class HybridEntityMemory:
-    """Hybrid entity memory: rule-based for common entities, LLM for complex ones"""
-    
-    def __init__(self, llm, max_token_limit=500, k=5):
-        self.llm = llm
-        self.max_token_limit = max_token_limit
-        self.k = k
-        self.entities = {}
-        self.buffer = []
-        self.llm_call_count = 0  # Track API calls
-        
-        # Rule-based patterns for common entities (no API calls)
-        self.rule_patterns = {
-            'name': [
-                r'أنا\s+([^\s]+(?:\s+[^\s]+)*)',  # Arabic: "أنا أحمد محمد"
-                r'اسمي\s+([^\s]+(?:\s+[^\s]+)*)',  # Arabic: "اسمي أحمد محمد"
-                r'my name is\s+([^\s]+(?:\s+[^\s]+)*)',  # English: "my name is John Smith"
-                r'i am\s+([^\s]+(?:\s+[^\s]+)*)',  # English: "I am John Smith"
-            ],
-            'phone': [
-                r'(\d{11})',  # Egyptian phone: 01234567890
-                r'(\d{3}-\d{3}-\d{4})',  # US phone: 123-456-7890
-                r'رقم\s+تليفوني\s+(\d+)',  # Arabic: "رقم تليفوني 01234567890"
-            ],
-            'email': [
-                r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
-                r'اميلي\s+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',  # Arabic
-            ],
-            'budget': [
-                r'(\d+)\s*مليون\s*جنيه',  # Arabic: "5 مليون جنيه"
-                r'\$(\d+(?:,\d{3})*)',  # English: "$500,000"
-                r'ميزانيتي\s+(\d+)',  # Arabic: "ميزانيتي 5"
-            ],
-            'location': [
-                r'في\s+([^\s]+(?:\s+[^\s]+)*)',  # Arabic: "في التجمع الخامس"
-                r'in\s+([^\s]+(?:\s+[^\s]+)*)',  # English: "in Dubai Marina"
-            ],
-            'bedrooms': [
-                r'(\d+)\s*غرف\s*نوم',  # Arabic: "3 غرف نوم"
-                r'(\d+)-bedroom',  # English: "2-bedroom"
-            ],
-            'area': [
-                r'(\d+)\s*متر\s*مربع',  # Arabic: "150 متر مربع"
-                r'(\d+)\s*sqm',  # English: "150 sqm"
-            ]
-        }
-        
-        # LLM prompt for complex entities (only when needed)
-        self.complex_entity_prompt = PromptTemplate(
-            input_variables=["conversation", "existing_entities"],
-            template="""Extract complex entities and preferences from this conversation that are NOT already captured in the existing entities.
-
-Existing entities: {existing_entities}
-
-Conversation:
-{conversation}
-
-Extract ONLY complex entities like:
-- Property preferences (style, features, amenities)
-- Timeline preferences (when they want to move, construction status)
-- Special requirements (accessibility, parking, etc.)
-- Investment goals
-- Family size/composition
-- Work location/commute preferences
-
-Return only valid JSON with new entities:"""
-        )
-        
-        self.complex_entity_chain = self.complex_entity_prompt | self.llm | StrOutputParser()
-    
-    @property
-    def memory_variables(self):
-        return ["entities"]
-    
-    def load_memory_variables(self, inputs):
-        return {"entities": self.entities}
-    
-    def save_context(self, inputs, outputs):
-        user_input = inputs.get("input", "")
-        ai_output = outputs.get("output", outputs.get("response", ""))
-        
-        self.buffer.append(HumanMessage(content=user_input))
-        self.buffer.append(AIMessage(content=ai_output))
-        
-        # Step 1: Extract common entities using rules (no API call)
-        self._extract_rule_based_entities(user_input)
-        self._extract_rule_based_entities(ai_output)
-        
-        # Step 2: Extract complex entities using LLM (only if we have enough context)
-        if len(self.buffer) >= 4:  # At least 2 exchanges
-            self._extract_complex_entities()
-    
-    def _extract_rule_based_entities(self, text):
-        """Extract common entities using regex patterns (no API calls)"""
-        for entity_type, patterns in self.rule_patterns.items():
-            for pattern in patterns:
-                matches = re.findall(pattern, text, re.IGNORECASE)
-                if matches:
-                    if entity_type not in self.entities:
-                        self.entities[entity_type] = []
-                    self.entities[entity_type].extend(matches)
-                    # Remove duplicates
-                    self.entities[entity_type] = list(set(self.entities[entity_type]))
-    
-    def _extract_complex_entities(self):
-        """Extract complex entities using LLM (API call)"""
-        # Only call LLM if we don't have complex entities yet or every 3 exchanges
-        if self.llm_call_count > 0 and self.llm_call_count % 3 != 0:
-            return
-            
-        conversation_text = "\n".join([
-            f"Human: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}"
-            for msg in self.buffer[-4:]  # Last 2 exchanges
-        ])
-        
-        try:
-            entity_response = self.complex_entity_chain.invoke({
-                "conversation": conversation_text,
-                "existing_entities": json.dumps(self.entities, indent=2)
-            })
-            
-            # Try to parse JSON response
-            import re
-            json_match = re.search(r'\{.*\}', entity_response, re.DOTALL)
-            if json_match:
-                new_entities = json.loads(json_match.group())
-                self.entities.update(new_entities)
-                
-                # Keep only top k entities
-                if len(self.entities) > self.k:
-                    # Keep the most recent ones
-                    keys_to_keep = list(self.entities.keys())[-self.k:]
-                    self.entities = {k: self.entities[k] for k in keys_to_keep}
-                
-                self.llm_call_count += 1
-                print(f"🔍 LLM entity extraction call #{self.llm_call_count}")
-                
-        except Exception as e:
-            print(f"Error extracting complex entities: {e}")
-    
-    def clear(self):
-        self.entities.clear()
-        self.buffer.clear()
-        self.llm_call_count = 0
-
-class CombinedConversationMemory:
-    """Combined memory that uses both summary and entity memory"""
-    
-    def __init__(self, summary_memory, entity_memory):
-        self.summary_memory = summary_memory
-        self.entity_memory = entity_memory
-
-    @property
-    def memory_variables(self):
-        return ["history", "entities_str"]
-
-    def load_memory_variables(self, inputs):
-        # Ensure inputs is not empty
-        if not inputs or not isinstance(inputs, dict):
-            inputs = {"input": ""}
-        
-        # Ensure "input" key exists
-        if "input" not in inputs:
-            inputs["input"] = ""
-            
-        summary = self.summary_memory.load_memory_variables(inputs).get("history", "")
-        ent = self.entity_memory.load_memory_variables(inputs).get("entities", {})
-        return {
-            "history": summary,
-            "entities_str": json.dumps(ent, indent=2)
-        }
-
-    def save_context(self, inputs, outputs):
-        # Ensure inputs is not empty
-        if not inputs or not isinstance(inputs, dict):
-            inputs = {"input": ""}
-        
-        # Ensure "input" key exists
-        if "input" not in inputs:
-            inputs["input"] = ""
-            
-        user_input = inputs.get("input", "")
-        ai_output = outputs.get("output", outputs.get("response", ""))
-        
-        # Save summary
-        self.summary_memory.save_context({"input": user_input}, {"output": ai_output})
-        # Save entities (hybrid approach)
-        self.entity_memory.save_context({"input": user_input}, {"output": ai_output})
-
-    def add_message_to_memory(self, message, sender="user"):
-        """Add a message to memory (for backward compatibility)"""
-        if sender == "user":
-            self.save_context({"input": message}, {"output": ""})
+    for _ in range(k):
+        if not candidates:
+            break
+        if not selected:
+            # Select the most relevant doc first
+            idx = int(np.argmax(sim_to_query))
+            selected.append(idx)
+            candidates.remove(idx)
         else:
-            # For AI messages, we need a user input to pair with
-            self.save_context({"input": "AI response"}, {"output": message})
+            mmr_scores = []
+            for idx in candidates:
+                relevance = sim_to_query[idx]
+                diversity = max([cosine_similarity(doc_embeddings[idx], doc_embeddings[s]) for s in selected])
+                mmr_score = lambda_param * relevance - (1 - lambda_param) * diversity
+                mmr_scores.append(mmr_score)
+            best_idx = candidates[int(np.argmax(mmr_scores))]
+            selected.append(best_idx)
+            candidates.remove(best_idx)
+    return selected
 
-    def update_user_preferences(self, preferences):
-        """Update user preferences in entity memory (for backward compatibility)"""
-        # This method is for backward compatibility
-        # The actual preference extraction happens in the save_context method
-        pass
+# --- Gemini Embedding Utility ---
+class GeminiEmbedder:
+    def __init__(self, api_key: str):
+        genai.configure(api_key=api_key)
+        self.embedding_model = genai.get_model("models/embedding-001")
+    def embed(self, text: str) -> List[float]:
+        result = self.embedding_model.embed_content(content=text, task_type="retrieval_query")
+        return result.embedding
+    def embed_many(self, texts: List[str]) -> List[List[float]]:
+        return [self.embed(t) for t in texts]
 
-    def update_search_results(self, session_id, results):
-        """Update search results (for backward compatibility)"""
-        # This method is for backward compatibility
-        # Search results are not stored in this memory manager
-        pass
+# --- Combined Search ---
+def combined_mmr_keyword_search(
+    query: str,
+    chroma_collection,
+    keyword_search_fn: Callable[[str], List[Dict]],
+    gemini_api_key: str,
+    k: int = 10,
+    fetch_k: int = 1000,
+    lambda_param: float = 0.8,
+    price_filter: float = None
+) -> List[Dict]:
+    """
+    Combined price-filtered MMR (embedding) and keyword search.
+    Args:
+        query: User query
+        chroma_collection: ChromaDB collection object
+        keyword_search_fn: Function for keyword search (returns list of dicts)
+        gemini_api_key: Gemini API key
+        k: Number of final results
+        fetch_k: Number of candidates to fetch from ChromaDB
+        lambda_param: MMR trade-off
+        price_filter: Price to filter by (if None, no price filtering)
+    Returns:
+        List of merged, deduplicated results
+    """
+    embedder = GeminiEmbedder(gemini_api_key)
+    query_emb = embedder.embed(query)
+    
+    # 1. Price-based filtering first (if price_filter is provided)
+    if price_filter is not None:
+        # Calculate price range with 10% tolerance
+        tolerance = 0.10
+        min_price = price_filter * (1 - tolerance)
+        max_price = price_filter * (1 + tolerance)
+        
+        # Filter by price range using metadata
+        price_filtered_results = chroma_collection.query(
+            query_texts=[query],
+            n_results=fetch_k,
+            where={
+                "price_value": {
+                    "$gte": min_price,
+                    "$lte": max_price
+                }
+            }
+        )
+        
+        # If price filtering returns results, use those for embedding search
+        if price_filtered_results['documents'][0]:
+            docs = price_filtered_results['documents'][0]
+            metadatas = price_filtered_results['metadatas'][0]
+            embeddings = price_filtered_results['embeddings'][0] if 'embeddings' in price_filtered_results else None
+            
+            if embeddings is None:
+                # If Chroma doesn't return embeddings, re-embed docs
+                embeddings = embedder.embed_many(docs)
+            
+            # 2. MMR selection on price-filtered results
+            mmr_indices = mmr(query_emb, embeddings, k=k, lambda_param=lambda_param)
+            mmr_results = [
+                {
+                    'document': docs[i],
+                    'metadata': metadatas[i],
+                    'score': cosine_similarity(query_emb, embeddings[i]),
+                    'source': 'price_filtered_embedding_mmr'
+                }
+                for i in mmr_indices
+            ]
+        else:
+            # No results with price filter, return empty
+            mmr_results = []
+    else:
+        # No price filtering - use original approach
+        # 1. Embedding search (fetch_k)
+        chroma_results = chroma_collection.query(query_texts=[query], n_results=fetch_k)
+        docs = chroma_results['documents'][0]
+        metadatas = chroma_results['metadatas'][0]
+        embeddings = chroma_results['embeddings'][0] if 'embeddings' in chroma_results else None
+        
+        if embeddings is None:
+            # If Chroma doesn't return embeddings, re-embed docs
+            embeddings = embedder.embed_many(docs)
+        
+        # 2. MMR selection
+        mmr_indices = mmr(query_emb, embeddings, k=k, lambda_param=lambda_param)
+        mmr_results = [
+            {
+                'document': docs[i],
+                'metadata': metadatas[i],
+                'score': cosine_similarity(query_emb, embeddings[i]),
+                'source': 'embedding_mmr'
+            }
+            for i in mmr_indices
+        ]
+    
+    # 3. Traditional keyword search (also apply price filter if available)
+    keyword_results = keyword_search_fn(query)
+    
+    # Apply price filter to keyword results if price_filter is provided
+    if price_filter is not None:
+        tolerance = 0.10
+        min_price = price_filter * (1 - tolerance)
+        max_price = price_filter * (1 + tolerance)
+        
+        filtered_keyword_results = []
+        for result in keyword_results:
+            # Extract price from keyword result metadata
+            result_price = result.get('metadata', {}).get('price_value', 0)
+            if min_price <= result_price <= max_price:
+                result['source'] = 'price_filtered_keyword'
+                filtered_keyword_results.append(result)
+        keyword_results = filtered_keyword_results
+    else:
+        for r in keyword_results:
+            r['source'] = 'keyword'
+    
+    # 4. Merge and deduplicate (by unique id if available, else by doc text)
+    seen = set()
+    merged = []
+    for r in mmr_results + keyword_results:
+        uid = r['metadata'].get('unit_id') or r['metadata'].get('launch_id') or r.get('document')
+        if uid not in seen:
+            merged.append(r)
+            seen.add(uid)
+    
+    return merged[:k]
 
-    def clear(self):
-        # Clear both memories
-        self.summary_memory.clear()
-        self.entity_memory.clear()
-
-# Initialize memories
-summary_memory = ConversationSummaryMemory(llm)
-entity_memory = HybridEntityMemory(llm)
-
-# Build memory manager
-memory_manager = CombinedConversationMemory(summary_memory, entity_memory)
+def price_filtered_mmr_search(
+    query: str,
+    chroma_collection,
+    gemini_api_key: str,
+    target_price: float,
+    k: int = 10,
+    fetch_k: int = 1000,
+    lambda_param: float = 0.9
+) -> List[Dict]:
+    """
+    Simplified price-filtered MMR search without keyword search.
+    Args:
+        query: User query
+        chroma_collection: ChromaDB collection object
+        gemini_api_key: Gemini API key
+        target_price: Target price for filtering
+        k: Number of results to return
+        fetch_k: Number of candidates to fetch from ChromaDB
+        lambda_param: MMR trade-off
+    Returns:
+        List of price-filtered MMR results
+    """
+    return combined_mmr_keyword_search(
+        query=query,
+        chroma_collection=chroma_collection,
+        keyword_search_fn=lambda q: [],  # No keyword search
+        gemini_api_key=gemini_api_key,
+        k=k,
+        fetch_k=fetch_k,
+        lambda_param=lambda_param,
+        price_filter=target_price
+    ) 
