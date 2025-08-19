@@ -33,11 +33,8 @@ import config
 import core_functions
 import Assistant
 import functions
-# Fallback import: Cache_code vs cache_code (depending on filename casing)
-try:
-    import Cache_code as Cache_code
-except ImportError:
-    import cache_code as Cache_code
+# Import Cache_code module
+import Cache_code
 from session_store import save_session, get_session
 import variables
 from config import (
@@ -45,6 +42,8 @@ from config import (
     schedule_viewing_tool,
     search_new_launches_tool,
     get_unit_details_tool,
+    insight_search_tool,
+    get_more_units_tool,
     configure_gemini,
 )
 
@@ -99,7 +98,9 @@ try:
         property_search_tool,
         schedule_viewing_tool,
         search_new_launches_tool,
-        get_unit_details_tool
+        get_unit_details_tool,
+        insight_search_tool,
+        get_more_units_tool
     ])
     model = genai.GenerativeModel(
         variables.GEMINI_MODEL_NAME,
@@ -288,6 +289,33 @@ def chat():
 
             elif function_name == 'schedule_viewing':
                 bot_response = function_output.get('message', '✅ تم حجز الموعد بنجاح!')
+
+            elif function_name == 'insight_search':
+                message = function_output.get('message', '')
+                results = function_output.get('results', [])
+                results_str = "\n".join(results) if isinstance(results, list) else str(results)
+                bot_response = f"{message}\n\n{results_str}".strip()
+
+            elif function_name == 'get_more_units':
+                if function_output.get('results'):
+                    results = function_output.get('results', [])
+                    real_results_str = ""
+                    for line in results[:10]:
+                        if isinstance(line, str):
+                            real_results_str += line + "\n"
+                        elif isinstance(line, dict):
+                            real_results_str += (
+                                f"ID:{line.get('id','غير متوفر')} | "
+                                f"{line.get('name_ar', line.get('name_en','غير متوفر'))} | "
+                                f"السعر: {line.get('price', 'غير متوفر')} | "
+                                f"غرف: {line.get('Bedrooms', line.get('bedrooms','غير متوفر'))} | "
+                                f"حمام: {line.get('Bathrooms', line.get('bathrooms','غير متوفر'))}\n"
+                            )
+                    message = function_output.get('message', '')
+                    follow_up = function_output.get('follow_up', '')
+                    bot_response = f"{message}\n\n{real_results_str}\n{follow_up}".strip()
+                else:
+                    bot_response = function_output.get('message', 'لم يتم العثور على وحدات إضافية.')
 
             else:
                 bot_response = function_output.get('message') or f"✅ تم تنفيذ {function_name} بنجاح: {function_output}"
