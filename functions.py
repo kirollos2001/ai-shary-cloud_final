@@ -827,11 +827,46 @@ def property_search(arguments):
             
             # Prepare formatted list (max 10)
             formatted_lines = [format_unit(itm, i+1) for i, itm in enumerate(quality_filtered_results[:10])]
-            intro_msg = (
-                f"👋 أهلاً بحضرتك!\nلقيتلك وحدات مناسبة في {location if location else 'المنطقة المطلوبة'}"
-                + (f" داخل كمبوند {compound_name}" if compound_name else " داخل كمبوندات مختلفة")
-                + "، وفي حدود ميزانيتك وعدد الغرف والحمامات اللي طلبتهم 👇"
-            )
+            
+            # Analyze actual compounds found in results to generate accurate message
+            def generate_accurate_intro_message(results, location, requested_compound):
+                """Generate intro message based on actual results, not requested criteria"""
+                try:
+                    # Extract unique compounds from actual results
+                    found_compounds = set()
+                    for result in results[:10]:  # Only check top 10 displayed results
+                        compound_ar = result.get('compound_name_ar', '').strip()
+                        compound_en = result.get('compound_name_en', '').strip()
+                        compound_name = compound_ar or compound_en
+                        if compound_name and compound_name.lower() != 'غير متوفر':
+                            found_compounds.add(compound_name)
+                    
+                    # Generate message based on what was actually found
+                    location_text = location if location else 'المنطقة المطلوبة'
+                    
+                    if len(found_compounds) == 0:
+                        compound_text = "داخل كمبوندات مختلفة"
+                    elif len(found_compounds) == 1:
+                        compound_text = f"داخل كمبوند {list(found_compounds)[0]}"
+                    elif len(found_compounds) <= 3:
+                        compound_list = list(found_compounds)[:3]
+                        compound_text = f"داخل كمبوندات {' و '.join(compound_list)}"
+                    else:
+                        compound_text = "داخل كمبوندات مختلفة"
+                    
+                    return (
+                        f"👋 أهلاً بحضرتك!\nلقيتلك وحدات مناسبة في {location_text} "
+                        f"{compound_text}، وفي حدود ميزانيتك وعدد الغرف والحمامات اللي طلبتهم 👇"
+                    )
+                except Exception as e:
+                    logging.warning(f"Error generating intro message: {e}")
+                    # Fallback to simple message without compound mention
+                    return (
+                        f"👋 أهلاً بحضرتك!\nلقيتلك وحدات مناسبة في {location if location else 'المنطقة المطلوبة'} "
+                        "داخل كمبوندات مختلفة، وفي حدود ميزانيتك وعدد الغرف والحمامات اللي طلبتهم 👇"
+                    )
+            
+            intro_msg = generate_accurate_intro_message(quality_filtered_results, location, compound_name)
             # Compute similarity-like scores from chroma distance (not shown in UI)
             similarity_scores = []
             for itm in quality_filtered_results[:10]:
@@ -848,11 +883,11 @@ def property_search(arguments):
             
                 # Progressive search follow-up message
                 if search_round == 1:
-                    follow_up_msg = "✨ \"تحب أوريك تفاصيل أكتر عن وحدة معينة؟ ابعتلي رقم الـID اللي شد انتباهك 🔍\nأو تحب أعرضلك خيارات إضافية من الوحدات المتاحة؟ (مرونة السعر +10%)\""
+                    follow_up_msg = "✨ \"تحب أوريك تفاصيل أكتر عن وحدة معينة؟ ابعتلي رقم الـID اللي شد انتباهك 🔍\nأو تحب أعرضلك خيارات إضافية من الوحدات المتاحة؟\""
                 elif search_round == 2:
-                    follow_up_msg = "✨ \"تحب أوريك تفاصيل أكتر عن وحدة معينة؟ ابعتلي رقم الـID اللي شد انتباهك 🔍\nأو تحب أعرضلك المزيد من الخيارات؟ (بحث بمرونة أكبر في السعر +20%)\""
+                    follow_up_msg = "✨ \"تحب أوريك تفاصيل أكتر عن وحدة معينة؟ ابعتلي رقم الـID اللي شد انتباهك 🔍\nأو تحب أعرضلك المزيد من الخيارات؟ \""
                 else:
-                    follow_up_msg = "✨ \"تحب أوريك تفاصيل أكتر عن وحدة معينة؟ ابعتلي رقم الـID اللي شد انتباهك 🔍\nأو تحب أعرضلك المزيد من الخيارات؟ (بحث نهائي بمرونة +25%)\""
+                    follow_up_msg = "✨ \"تحب أوريك تفاصيل أكتر عن وحدة معينة؟ ابعتلي رقم الـID اللي شد انتباهك 🔍\nأو تحب أعرضلك المزيد من الخيارات؟ \""
                 # Store search parameters in session for progressive search (first round only)
                 if search_round == 1:
                     import config
@@ -2376,7 +2411,7 @@ def get_unit_details(arguments):
 🚽 **عدد الحمامات:** {bathrooms_val}  
 
 🚚 **الاستلام خلال:** {delivery_in_val} سنة  
-💳 **تقسيط حتى:** {installment_years_val} سنة  
+💳 **تقسيط حتى:** {installment_years_val} سنين  
 
 🖼️ **صورة العقار:** {image_val}
 
@@ -2646,6 +2681,3 @@ def get_unit_details(arguments):
         return {
             "error": f"❌ خطأ في عرض تفاصيل الوحدة: {str(e)}"
         }
-
-
-
