@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 def fetch_user_info_from_api():
     """Fetch user information from external API."""
     try:
-        response = requests.get("https://sharyproperties.com/api/UserInfo", timeout=10)
+        response = requests.get("https://shary.eg/api/UserInfo", timeout=10)
         if response.status_code == 200:
             data = response.json()
             return {
