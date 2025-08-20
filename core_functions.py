@@ -6,8 +6,7 @@ import time
 import config
 import functions
 import variables
-from memory_manager import get_memory_manager
-memory_manager = get_memory_manager()
+from memory_manager import memory_manager
 
 def check_gemini_setup():
     """Check if Gemini API is properly configured"""
@@ -318,5 +317,6 @@ def get_resource_files():
             if os.path.isfile(file_path):
                 file_paths.append(file_path)
     return file_paths
+
 
 
