@@ -151,8 +151,15 @@ def start_conversation():
     config.client_sessions[session_id] = client_info
     return jsonify({"thread_id": session_id})
 
-@app.route("/chat", methods=["POST"])
+@app.route("/chat", methods=["GET", "POST"])
 def chat():
+    if request.method == "GET":
+        # Handle GET requests (e.g., for browser testing)
+        return jsonify({
+            "message": "This endpoint requires a POST request with JSON body. Example: {'message': 'Your query', 'thread_id': 'optional_session_id'}",
+            "status": "Use POST for chatting"
+        })
+
     data = request.json or {}
     thread_id = data.get("thread_id")
     user_message = f"Current Date: {datetime.datetime.now().strftime('%B %d, %Y')}\n" + data.get('message', '')
@@ -345,12 +352,17 @@ def test_gemini():
         logging.error(f"Gemini test error: {e}")
         return jsonify({"error": str(e)})
 
-@app.route("/test_smart_search", methods=["POST"])
+@app.route("/test_smart_search", methods=["GET", "POST"])
 def test_smart_search():
     try:
-        data = request.json or {}
-        query = data.get("query", "")
-        search_args = data.get("search_args", {})
+        if request.method == "GET":
+            query = request.args.get("query", "")
+            search_args = request.args.get("search_args", {})
+        else:
+            data = request.json or {}
+            query = data.get("query", "")
+            search_args = data.get("search_args", {})
+
         if not query:
             return jsonify({"error": "Query is required"}), 400
         logging.info(f"Testing smart search with query: {query}")
@@ -365,11 +377,15 @@ def test_smart_search():
         logging.error(f"Smart search test error: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/test_classification", methods=["POST"])
+@app.route("/test_classification", methods=["GET", "POST"])
 def test_classification():
     try:
-        data = request.json or {}
-        query = data.get("query", "")
+        if request.method == "GET":
+            query = request.args.get("query", "")
+        else:
+            data = request.json or {}
+            query = data.get("query", "")
+
         if not query:
             return jsonify({"error": "Query is required"}), 400
         logging.info(f"Testing classification with query: {query}")
