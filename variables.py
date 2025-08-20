@@ -19,7 +19,7 @@ EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 TEAM_EMAIL = os.environ.get("TEAM_EMAIL", "kirolloseisa2@gmail.com")
 
 # API Configuration
-USER_INFO_API_URL = os.environ.get("USER_INFO_API_URL", "https://sharyproperties.com/api/UserInfo")
+USER_INFO_API_URL = os.environ.get("USER_INFO_API_URL", "https://shary.eg/api/UserInfo")
 
 # Cache Configuration
 CACHE_DIR = "cache/"
@@ -43,3 +43,4 @@ SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", 3600))  # 1 hour in seco
 
 # Logging Configuration
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+
