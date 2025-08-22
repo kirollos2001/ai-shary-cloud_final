@@ -8,6 +8,7 @@ import functions
 import variables
 from memory_manager import memory_manager
 
+
 def check_gemini_setup():
     """Check if Gemini API is properly configured"""
     try:
@@ -194,21 +195,10 @@ async def process_gemini_response_async(model, user_message, session_id=None):
                         logging.info(f"🔧 Automatic function call detected: {function_name}")
                         logging.info(f"🔧 Function arguments: {function_args}")
                         
-                        # Send "please wait" message for search functions
+                        # Execute search functions immediately (no wait message needed)
                         if function_name in ["property_search", "search_new_launches", "insight_search"]:
-                            wait_message = "✨ من فضلك يا فندم، اديني لحظات أراجع البيانات وأجيبلك أنسب الوحدات."
-                            if function_name == "search_new_launches":
-                                wait_message = "✨ من فضلك يا فندم، اديني لحظات أراجع البيانات وأجيبلك أنسب الإطلاقات الجديدة."
-                            elif function_name == "insight_search":
-                                wait_message = "✨ من فضلك يا فندم، اديني لحظات أراجع البيانات وأجيبلك المعلومات المطلوبة."
-                            
-                            # Return the wait message first
-                            return {
-                                "wait_message": wait_message,
-                                "function_name": function_name,
-                                "function_args": dict(function_args),
-                                "continue_search": True
-                            }
+                            # Continue to execute the function immediately
+                            pass
                         
                         try:
                             # Execute the function
@@ -317,6 +307,4 @@ def get_resource_files():
             if os.path.isfile(file_path):
                 file_paths.append(file_path)
     return file_paths
-
-
 
