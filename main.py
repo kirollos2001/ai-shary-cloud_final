@@ -151,15 +151,8 @@ def start_conversation():
     config.client_sessions[session_id] = client_info
     return jsonify({"thread_id": session_id})
 
-@app.route("/chat", methods=["GET", "POST"])
+@app.route("/chat", methods=["POST"])
 def chat():
-    if request.method == "GET":
-        # Handle GET requests (e.g., for browser testing)
-        return jsonify({
-            "message": "This endpoint requires a POST request with JSON body. Example: {'message': 'Your query', 'thread_id': 'optional_session_id'}",
-            "status": "Use POST for chatting"
-        })
-
     data = request.json or {}
     thread_id = data.get("thread_id")
     user_message = f"Current Date: {datetime.datetime.now().strftime('%B %d, %Y')}\n" + data.get('message', '')
@@ -180,21 +173,26 @@ def chat():
         logging.info(f"🧵 New session created: {thread_id}")
         save_session(thread_id, client_info)
     else:
+        # Quick session check - don't block on missing sessions
         client_info = get_session(thread_id)
         if not client_info:
-            logging.info(f"Session not found for {thread_id}, creating default client info")
+            # Create minimal client info immediately, don't block
             client_info = {
                 "user_id": f"new_user_{thread_id}",
                 "name": "New User",
                 "phone": "Not Provided",
                 "email": "Not Provided"
             }
-            config.client_sessions[thread_id] = client_info
+            # Save session in background
+            try:
+                executor.submit(save_session, thread_id, client_info)
+            except Exception as e:
+                logging.warning(f"Background session save failed: {e}")
             logging.info(f"Created default session for {thread_id}: {client_info}")
 
     user_id = client_info["user_id"]
 
-    # Conversation history
+    # Conversation history - load quickly with fallback
     conversation_history = []
     try:
         conversations = functions.load_from_cache("conversations_cache.json")
@@ -204,16 +202,24 @@ def chat():
             None
         )
         if conversation:
+            # Limit history to last 5 messages for performance
+            recent_messages = conversation.get("description", [])[-5:]
             conversation_history = [
                 msg["message"]
-                for msg in conversation.get("description", [])
+                for msg in recent_messages
                 if msg.get("sender") == "Client"
             ]
     except Exception as e:
         logging.warning(f"Could not load conversation history: {e}")
+        # Continue without history - don't block the response
 
-    # Current preferences
-    current_preferences = functions.get_conversation_preferences(thread_id, user_id)
+    # Current preferences - load in background
+    current_preferences = {}
+    try:
+        # Load preferences in background to avoid blocking
+        executor.submit(lambda: functions.get_conversation_preferences(thread_id, user_id))
+    except Exception as e:
+        logging.warning(f"Background preferences loading failed: {e}")
 
     # Conversation path
     conversation_path = None
@@ -239,6 +245,7 @@ def chat():
         conversation_path
     )
 
+    # Store lead data for later processing (after response is sent)
     lead_data = {
         "user_id": user_id,
         "name": client_info.get("name", ""),
@@ -246,8 +253,6 @@ def chat():
         "email": client_info.get("email", ""),
         **extracted_info
     }
-    functions.create_lead(lead_data)
-    functions.log_conversation_to_db(thread_id, user_id, user_message)
 
     try:
         logging.info(f"Calling run_async_tool_calls with model, user_message, session_id={thread_id}")
@@ -257,6 +262,9 @@ def chat():
 
         if result and "error" in result:
             bot_response = f"❌ خطأ: {result['error']}"
+        elif result and "wait_message" in result:
+            # Function call is in progress, show wait message
+            bot_response = result["wait_message"]
         elif result and "function_output" in result:
             function_output = result['function_output']
             function_name = result.get('function_name')
@@ -332,8 +340,29 @@ def chat():
             bot_response = "❌ لم يتم استلام رد من المساعد."
             logging.warning("No valid response from Gemini or tool calls.")
 
-        functions.log_conversation_to_db(thread_id, "bot", bot_response)
-        return jsonify({"response": bot_response, "thread_id": thread_id})
+        # Send response to UI immediately (don't block on cache operations)
+        response_data = {"response": bot_response, "thread_id": thread_id}
+        
+        # Process cache operations in background AFTER response is sent
+        try:
+            # Create lead in background (non-blocking)
+            executor.submit(functions.create_lead, lead_data)
+        except Exception as e:
+            logging.warning(f"Background lead creation failed: {e}")
+        
+        # Log user conversation in background (non-blocking)
+        try:
+            executor.submit(functions.log_conversation_to_db, thread_id, user_id, user_message)
+        except Exception as e:
+            logging.warning(f"Background user conversation logging failed: {e}")
+        
+        # Log bot response to database in background (non-blocking)
+        try:
+            executor.submit(functions.log_conversation_to_db, thread_id, "bot", bot_response)
+        except Exception as e:
+            logging.warning(f"Background bot response logging failed: {e}")
+        
+        return jsonify(response_data)
     except Exception as e:
         logging.error(f"Error generating response: {e}")
         return jsonify({"error": "Failed to generate response"}), 500
@@ -352,17 +381,12 @@ def test_gemini():
         logging.error(f"Gemini test error: {e}")
         return jsonify({"error": str(e)})
 
-@app.route("/test_smart_search", methods=["GET", "POST"])
+@app.route("/test_smart_search", methods=["POST"])
 def test_smart_search():
     try:
-        if request.method == "GET":
-            query = request.args.get("query", "")
-            search_args = request.args.get("search_args", {})
-        else:
-            data = request.json or {}
-            query = data.get("query", "")
-            search_args = data.get("search_args", {})
-
+        data = request.json or {}
+        query = data.get("query", "")
+        search_args = data.get("search_args", {})
         if not query:
             return jsonify({"error": "Query is required"}), 400
         logging.info(f"Testing smart search with query: {query}")
@@ -377,15 +401,11 @@ def test_smart_search():
         logging.error(f"Smart search test error: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/test_classification", methods=["GET", "POST"])
+@app.route("/test_classification", methods=["POST"])
 def test_classification():
     try:
-        if request.method == "GET":
-            query = request.args.get("query", "")
-        else:
-            data = request.json or {}
-            query = data.get("query", "")
-
+        data = request.json or {}
+        query = data.get("query", "")
         if not query:
             return jsonify({"error": "Query is required"}), 400
         logging.info(f"Testing classification with query: {query}")
@@ -405,8 +425,8 @@ def test_classification():
 @app.route("/health", methods=["GET"])
 def health_check():
     try:
-        from chroma_rag_setup import RealEstateRAG
-        rag = RealEstateRAG()
+        from chroma_rag_setup import get_rag_instance
+        rag = get_rag_instance()
         stats = rag.get_collection_stats()
         test_results = rag.search_units("test", n_results=1) or []
         ok_search = len(test_results) > 0
@@ -487,8 +507,8 @@ def initialize_chromadb_for_cloud():
     """Recreate ChromaDB collections and embed data from caches"""
     try:
         logging.info("🔄 Initializing ChromaDB collections for Google Cloud deployment...")
-        from chroma_rag_setup import RealEstateRAG
-        rag = RealEstateRAG()
+        from chroma_rag_setup import get_rag_instance
+        rag = get_rag_instance()
         units_data = Cache_code.load_from_cache("units.json")
         new_launches_data = Cache_code.load_from_cache("new_launches.json")
         logging.info(f"📊 Loaded {len(units_data)} units and {len(new_launches_data)} new launches from cache")
