@@ -152,7 +152,7 @@ def start_conversation():
     return jsonify({"thread_id": session_id})
 
 @app.route("/chat", methods=["POST"])
-def chat():
+async def chat():
     data = request.json or {}
     thread_id = data.get("thread_id")
     user_message = f"Current Date: {datetime.datetime.now().strftime('%B %d, %Y')}\n" + data.get('message', '')
@@ -255,9 +255,14 @@ def chat():
     }
 
     try:
-        logging.info(f"Calling run_async_tool_calls with model, user_message, session_id={thread_id}")
-        # Offload to the thread pool (still waits, but frees Flask main thread setup)
-        result = executor.submit(run_async_tool_calls, model, user_message, thread_id).result()
+        logging.info(
+            f"Calling run_async_tool_calls with model, user_message, session_id={thread_id}"
+        )
+        # Offload processing to thread pool and await result without blocking
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            executor, run_async_tool_calls, model, user_message, thread_id
+        )
         logging.info(f"Result from run_async_tool_calls: {result}")
 
         if result and "error" in result:
