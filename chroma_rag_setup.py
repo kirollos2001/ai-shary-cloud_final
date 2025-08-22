@@ -77,6 +77,10 @@ class GeminiEmbeddingFunction:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Singleton cache for RAG instance
+_rag_instance = None
+
+
 class RealEstateRAG:
     def __init__(self, persist_directory: str = "./chroma_db"):
         self.persist_directory = persist_directory
@@ -802,6 +806,12 @@ Address: {city_name}
                 'total_results': 0,
                 'search_method': 'error'
             }
+def get_rag_instance() -> 'RealEstateRAG':
+    """Return a shared RealEstateRAG instance."""
+    global _rag_instance
+    if _rag_instance is None:
+        _rag_instance = RealEstateRAG()
+    return _rag_instance           
 
 def main():
     logger.info("🚀 Starting ChromaDB RAG setup for real estate data...")
