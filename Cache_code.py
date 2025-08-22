@@ -1,12 +1,13 @@
 import os
 import json
 import logging
+import time
 
 from config import get_db_connection
 
-CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/cache")
+CACHE_DIR = "cache"
 if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR)
 
 def save_to_cache(filename, data):
     try:
@@ -20,14 +21,62 @@ def save_to_cache(filename, data):
 def load_from_cache(filename):
     path = os.path.join(CACHE_DIR, filename)
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            # Try UTF-8 first
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except UnicodeDecodeError as e:
+            logging.warning(f"UTF-8 decode error in {filename}: {e}")
+            # Return empty list and backup corrupted file immediately
+            backup_path = path + f".corrupted_{int(time.time())}"
+            try:
+                os.rename(path, backup_path)
+                logging.warning(f"Backed up corrupted file to {backup_path}")
+            except Exception as e2:
+                logging.error(f"Failed to backup corrupted file: {e2}")
+            return []
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON decode error in {filename}: {e}")
+            # Return empty list and backup corrupted file
+            backup_path = path + f".corrupted_{int(time.time())}"
+            try:
+                os.rename(path, backup_path)
+                logging.warning(f"Backed up corrupted JSON file to {backup_path}")
+            except Exception as e2:
+                logging.error(f"Failed to backup corrupted JSON file: {e2}")
+            return []
+        except Exception as e:
+            logging.error(f"Unexpected error loading {filename}: {e}")
+            return []
     return []
 
 def append_to_cache(filename, entry):
     path = os.path.join(CACHE_DIR, filename)
     data = load_from_cache(filename)
     data.append(entry)
+    save_to_cache(filename, data)
+
+def upsert_to_cache(filename, entry, key_field):
+    """
+    Insert or update an entry in cache based on a key field.
+    If an entry with the same key_field value exists, it will be updated.
+    Otherwise, a new entry will be added.
+    """
+    path = os.path.join(CACHE_DIR, filename)
+    data = load_from_cache(filename)
+    
+    # Find existing entry
+    updated = False
+    for i, existing in enumerate(data):
+        if existing.get(key_field) == entry.get(key_field):
+            data[i] = entry
+            updated = True
+            break
+    
+    # If not found, append new entry
+    if not updated:
+        data.append(entry)
+    
     save_to_cache(filename, data)
 def enrich_units_with_names():
     query = """
@@ -254,6 +303,5 @@ def sync_conversations_to_db():
 
     save_to_cache("conversations_updates.json", [])
     logging.info(f"✅ Synced {len(convos)} conversations to DB and cleared conversations_updates.json")
-
 
 
