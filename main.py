@@ -151,8 +151,15 @@ def start_conversation():
     config.client_sessions[session_id] = client_info
     return jsonify({"thread_id": session_id})
 
-@app.route("/chat", methods=["POST"])
+@app.route("/chat", methods=["GET", "POST"])
 async def chat():
+    if request.method == "GET":
+        # Handle GET requests (e.g., for browser testing)
+        return jsonify({
+            "message": "This endpoint requires a POST request with JSON body. Example: {'message': 'Your query', 'thread_id': 'optional_session_id'}",
+            "status": "Use POST for chatting"
+        })
+
     data = request.json or {}
     thread_id = data.get("thread_id")
     user_message = f"Current Date: {datetime.datetime.now().strftime('%B %d, %Y')}\n" + data.get('message', '')
