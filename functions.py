@@ -112,7 +112,7 @@ def schedule_viewing(arguments):
     developer_name = get_developer_name_from_database(property_id) or "Unknown Developer"
     property_name = get_property_name_from_database(property_id) or "Unknown Property"
 
-    summary = advanced_conversation_summary_from_db(client_id, conversation_id)
+    summary = advanced_conversation_summary_from_db(client_id, conversation_id, name, property_id)
 
     subject = f"🔔 معاينة وحدة جديدة - ID {property_id}"
     body = f"""
@@ -216,8 +216,8 @@ def search_new_launches(arguments):
         time.sleep(0.3)
 
         # Use RAG (Chroma) semantic search for new launches
-        from chroma_rag_setup import RealEstateRAG
-        rag = RealEstateRAG()
+        from chroma_rag_setup import get_rag_instance
+        rag = get_rag_instance()
         rag_results = rag.search_new_launches(query_text, n_results=50, filters=None)
 
         if not rag_results:
@@ -661,11 +661,11 @@ def property_search(arguments):
         
         try:
             # Import and use the proper ChromaDB RAG system
-            from chroma_rag_setup import RealEstateRAG
+            from chroma_rag_setup import get_rag_instance
             # MMR is now handled directly in the RAG pipeline
             
             # Initialize RAG system
-            rag = RealEstateRAG()
+            rag = get_rag_instance()
             
             # Build filters for ChromaDB query
             filters = {}
@@ -957,38 +957,46 @@ def serialize_mysql_result(results):
 from datetime import datetime
 
 def log_conversation_to_db(conversation_id, user_id, message):
-    conversations = load_from_cache("conversations_cache.json")
+    try:
+        conversations = load_from_cache("conversations_cache.json")
 
-    # Find existing conversation or create a new one
-    convo = next((c for c in conversations if c["conversation_id"] == conversation_id), None)
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Find existing conversation or create a new one
+        convo = next((c for c in conversations if c["conversation_id"] == conversation_id), None)
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    if not convo:
-        convo = {
-            "conversation_id": conversation_id,
-            "user_id": user_id,
-            "description": [],
-            "created_at": now_str,
-            "updated_at": now_str
-        }
-        conversations.append(convo)
-    else:
-        convo["updated_at"] = now_str  # Update timestamp
+        if not convo:
+            convo = {
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "description": [],
+                "created_at": now_str,
+                "updated_at": now_str
+            }
+            conversations.append(convo)
+        else:
+            convo["updated_at"] = now_str  # Update timestamp
 
-    # Append new message
-    convo["description"].append({
-        "sender": "Client" if user_id != "bot" else "Bot",
-        "message": message,
-        "timestamp": now_str
-    })
+        # Append new message
+        convo["description"].append({
+            "sender": "Client" if user_id != "bot" else "Bot",
+            "message": message,
+            "timestamp": now_str
+        })
 
-    save_to_cache("conversations_cache.json", conversations)
-    append_to_cache("conversations_updates.json", convo)
-    logging.info(f"📝 Updated full conversation thread: {conversation_id}")
+        # Save to cache in background (non-blocking)
+        try:
+            save_to_cache("conversations_cache.json", conversations)
+            append_to_cache("conversations_updates.json", convo)
+            logging.info(f"📝 Updated conversation thread: {conversation_id}")
+        except Exception as e:
+            logging.warning(f"Cache save failed: {e}")
+            
+    except Exception as e:
+        logging.error(f"Error in log_conversation_to_db: {e}")
 
 
 
-def advanced_conversation_summary_from_db(client_id, conversation_id):
+def advanced_conversation_summary_from_db(client_id, conversation_id, name="Unknown", property_id="Unknown"):
     """
     Fetch conversation from cache (new structure), summarize it using OpenAI, and return the summary.
     """
@@ -996,14 +1004,39 @@ def advanced_conversation_summary_from_db(client_id, conversation_id):
         # 1️⃣ Load cached conversations
         conversations = load_from_cache("conversations_cache.json")
 
-        # 2️⃣ Find the matching conversation
+        # 2️⃣ Find the matching conversation - try multiple lookup strategies
+        convo = None
+        
+        # Strategy 1: Exact match on conversation_id and user_id
         convo = next(
             (c for c in conversations if str(c["conversation_id"]) == str(conversation_id) and str(c["user_id"]) == str(client_id)),
             None
         )
+        
+        # Strategy 2: If not found, try just conversation_id match
+        if not convo:
+            convo = next(
+                (c for c in conversations if str(c["conversation_id"]) == str(conversation_id)),
+                None
+            )
+        
+        # Strategy 3: If still not found, try user_id match
+        if not convo:
+            convo = next(
+                (c for c in conversations if str(c["user_id"]) == str(client_id)),
+                None
+            )
 
         if not convo:
-            return "❌ لم يتم العثور على المحادثة في الذاكرة المؤقتة."
+            # Debug: Log what we're looking for and what's available
+            logging.warning(f"🔍 Conversation lookup failed:")
+            logging.warning(f"   Looking for: conversation_id='{conversation_id}', client_id='{client_id}'")
+            logging.warning(f"   Available conversations: {len(conversations)}")
+            if conversations:
+                sample_convo = conversations[0]
+                logging.warning(f"   Sample conversation: conversation_id='{sample_convo.get('conversation_id')}', user_id='{sample_convo.get('user_id')}'")
+            # Return a basic summary when no conversation is found
+            return f"ملخص المحادثة: العميل {name} (ID: {client_id}) طلب معاينة للعقار {property_id}. لم يتم العثور على محادثة مفصلة في الذاكرة المؤقتة."
 
         conversation_data = convo.get("description", [])
         if not isinstance(conversation_data, list):
@@ -1014,19 +1047,49 @@ def advanced_conversation_summary_from_db(client_id, conversation_id):
             f"{msg['sender']}: {msg['message']}" for msg in conversation_data
         )
 
-        # 4️⃣ Create Arabic prompt for summarization
+        # 4️⃣ Create Arabic prompt for summarization with enhanced system instructions
         prompt = f"""
-        أنت مساعد مبيعات AI. قم بتلخيص المحادثة التالية بين عميل وروبوت دردشة باللهجة المصرية.
-        يجب أن يتضمن الملخص:
-        - متطلبات العميل (الميزانية، الموقع، نوع العقار)
-        - أي اعتراضات أو مخاوف
-        - الرغبة في مقابلة أو معاينة
-        - أي اهتمام بمطورين محددين.
+        أنت مساعد مبيعات عقاري محترف ومتخصص في تلخيص المحادثات العقارية. مهمتك هي تحليل المحادثة التالية وتقديم ملخص شامل ومفيد لفريق المبيعات.
 
-        Conversation:
+        **تعليمات النظام:**
+        - استخدم اللهجة المصرية المحترفة
+        - ركز على المعلومات العملية والمفيدة لفريق المبيعات
+        - اكتب الملخص بشكل منظم وواضح
+        - استخدم النقاط والتنسيق المناسب
+        - اذكر الأرقام والتواريخ بدقة
+
+        **المعلومات المطلوبة في الملخص:**
+        1. **معلومات العميل الأساسية:**
+           - نوع العميل (جديد/متكرر)
+           - مستوى الاهتمام (عالٍ/متوسط/منخفض)
+
+        2. **متطلبات العقار:**
+           - نوع العقار المطلوب (شقة/فيلا/تجاري)
+           - الموقع المفضل
+           - الميزانية المتوقعة
+           - عدد الغرف والحمامات
+           - المساحة المطلوبة
+
+        3. **تفضيلات إضافية:**
+           - الكمبوند المفضل
+           - نوع الاستلام (جاهز/تحت الإنشاء)
+           - نظام الدفع المفضل
+           - الغرض من الشراء (سكن/استثمار)
+
+        4. **نقاط مهمة:**
+           - أي اعتراضات أو مخاوف
+           - المواعيد المفضلة للمعاينة
+           - أي طلبات خاصة
+           - مستوى الاستعجال
+
+        5. **الخطوات التالية المقترحة:**
+           - نوع المتابعة المطلوبة
+           - أفضل وقت للتواصل
+
+        **المحادثة:**
         {formatted_conversation}
 
-        Summary:
+        **الملخص:**
         """
 
         print(f"📋 Prompt for summarization: {prompt}")
@@ -1041,19 +1104,49 @@ def advanced_conversation_summary_from_db(client_id, conversation_id):
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
             
-            # Create the prompt for Gemini
+            # Create the prompt for Gemini with enhanced system instructions
             gemini_prompt = f"""
-            أنت مساعد مبيعات AI. قم بتلخيص المحادثة التالية بين عميل وروبوت دردشة باللهجة المصرية.
-            يجب أن يتضمن الملخص:
-            - متطلبات العميل (الميزانية، الموقع، نوع العقار)
-            - أي اعتراضات أو مخاوف
-            - الرغبة في مقابلة أو معاينة
-            - أي اهتمام بمطورين محددين.
+            أنت مساعد مبيعات عقاري محترف ومتخصص في تلخيص المحادثات العقارية. مهمتك هي تحليل المحادثة التالية وتقديم ملخص شامل ومفيد لفريق المبيعات.
 
-            المحادثة:
+            **تعليمات النظام:**
+            - استخدم اللهجة المصرية المحترفة
+            - ركز على المعلومات العملية والمفيدة لفريق المبيعات
+            - اكتب الملخص بشكل منظم وواضح
+            - استخدم النقاط والتنسيق المناسب
+            - اذكر الأرقام والتواريخ بدقة
+
+            **المعلومات المطلوبة في الملخص:**
+            1. **معلومات العميل الأساسية:**
+               - نوع العميل (جديد/متكرر)
+               - مستوى الاهتمام (عالٍ/متوسط/منخفض)
+
+            2. **متطلبات العقار:**
+               - نوع العقار المطلوب (شقة/فيلا/تجاري)
+               - الموقع المفضل
+               - الميزانية المتوقعة
+               - عدد الغرف والحمامات
+               - المساحة المطلوبة
+
+            3. **تفضيلات إضافية:**
+               - الكمبوند المفضل
+               - نوع الاستلام (جاهز/تحت الإنشاء)
+               - نظام الدفع المفضل
+               - الغرض من الشراء (سكن/استثمار)
+
+            4. **نقاط مهمة:**
+               - أي اعتراضات أو مخاوف
+               - المواعيد المفضلة للمعاينة
+               - أي طلبات خاصة
+               - مستوى الاستعجال
+
+            5. **الخطوات التالية المقترحة:**
+               - نوع المتابعة المطلوبة
+               - أفضل وقت للتواصل
+
+            **المحادثة:**
             {formatted_conversation}
 
-            الملخص:
+            **الملخص:**
             """
             
             response = model.generate_content(gemini_prompt)
@@ -1419,8 +1512,8 @@ def insight_search(arguments):
             except Exception:
                 pass
 
-        from chroma_rag_setup import RealEstateRAG
-        rag = RealEstateRAG()
+        from chroma_rag_setup import get_rag_instance
+        rag = get_rag_instance()
 
         # Strategy: Retrieve ALL available data first with broad search
         # Then let LLM analyze and filter the results
@@ -1646,7 +1739,7 @@ def extract_client_preferences_llm(user_message, conversation_history=None, curr
         
         # Set up Gemini
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         # Build context from conversation history and current preferences
         context = ""
@@ -1833,8 +1926,12 @@ def get_conversation_preferences(conversation_id, user_id):
     This function builds a comprehensive preference profile from the entire conversation.
     """
     try:
-        # Load conversation history
+        # Load conversation history with error handling
         conversations = load_from_cache("conversations_cache.json")
+        
+        if not conversations:
+            logging.warning(f"No conversations found in cache for {conversation_id}")
+            return {}
         
         # Find the specific conversation
         conversation = next(
@@ -1843,34 +1940,53 @@ def get_conversation_preferences(conversation_id, user_id):
         )
         
         if not conversation:
+            logging.info(f"No conversation found for {conversation_id} and user {user_id}")
             return {}
         
-        # Extract all user messages
-        user_messages = [
-            msg["message"] for msg in conversation.get("description", [])
-            if msg.get("sender") == "Client"
-        ]
+        # Extract all user messages with error handling
+        try:
+            description = conversation.get("description", [])
+            if not isinstance(description, list):
+                logging.warning(f"Invalid description format for conversation {conversation_id}")
+                return {}
+            
+            user_messages = [
+                msg["message"] for msg in description
+                if isinstance(msg, dict) and msg.get("sender") == "Client" and msg.get("message")
+            ]
+        except Exception as e:
+            logging.error(f"Error extracting user messages from conversation {conversation_id}: {e}")
+            return {}
+        
+        if not user_messages:
+            logging.info(f"No user messages found in conversation {conversation_id}")
+            return {}
         
         # Build comprehensive preferences from all messages
         accumulated_preferences = {}
         
-        for message in user_messages:
-            # Extract preferences from each message
-            message_preferences = extract_client_preferences_llm(
-                message, 
-                user_messages[:user_messages.index(message)], 
-                accumulated_preferences
-            )
-            
-            # Merge preferences (new info overrides old)
-            for key, value in message_preferences.items():
-                if value and value != 0 and value != "":
-                    accumulated_preferences[key] = value
+        for i, message in enumerate(user_messages):
+            try:
+                # Extract preferences from each message
+                message_preferences = extract_client_preferences_llm(
+                    message, 
+                    user_messages[:i], 
+                    accumulated_preferences
+                )
+                
+                # Merge preferences (new info overrides old)
+                if isinstance(message_preferences, dict):
+                    for key, value in message_preferences.items():
+                        if value and value != 0 and value != "":
+                            accumulated_preferences[key] = value
+            except Exception as e:
+                logging.warning(f"Error processing message {i} in conversation {conversation_id}: {e}")
+                continue
         
         return accumulated_preferences
         
     except Exception as e:
-        print(f"🚨 Error getting conversation preferences: {e}")
+        logging.error(f"🚨 Error getting conversation preferences for {conversation_id}: {e}")
         return {}
 
 def intelligent_property_search_with_expansion(user_query, search_arguments, chroma_collection, gemini_api_key):
@@ -2275,8 +2391,8 @@ def get_unit_details(arguments):
         
         # First, try to find in new launches (since this is more likely for new launch IDs)
         try:
-            from chroma_rag_setup import RealEstateRAG
-            rag = RealEstateRAG()
+            from chroma_rag_setup import get_rag_instance
+            rag = get_rag_instance()
             nl_results = rag.new_launches_collection.query(
                 query_texts=["launch details"],
                 n_results=1,
@@ -2681,3 +2797,6 @@ def get_unit_details(arguments):
         return {
             "error": f"❌ خطأ في عرض تفاصيل الوحدة: {str(e)}"
         }
+
+
+
