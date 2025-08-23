@@ -211,10 +211,6 @@ def search_new_launches(arguments):
         
         query_text = " ".join(semantic_parts) if semantic_parts else "new launch properties"
 
-        # Small delay for better UX (wait message handled at API level)
-        import time
-        time.sleep(0.3)
-
         # Use RAG (Chroma) semantic search for new launches
         from chroma_rag_setup import get_rag_instance
         rag = get_rag_instance()
@@ -617,10 +613,6 @@ def property_search(arguments):
                            + "- ممكن كمان تقولّي كمبوند مفضل لو حابب (اختياري)",
                 "results": []
             }
-        
-        # Small delay for better UX (wait message handled at API level)
-        import time
-        time.sleep(0.3)
         
         # Convert budget to float if it's a string
         try:
