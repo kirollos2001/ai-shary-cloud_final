@@ -734,24 +734,13 @@
                 .then(data => {
                     console.log("Response from server:", data);
 
-                    // Check if this is a wait message with pending search
-                    if (data.wait_message && data.trigger_search) {
-                        // Step 1: Show wait message
-                        removeTypingIndicator();
-                        let waitMessage = data.wait_message.replace(/\n/g, '<br>');
-                        addMessage(waitMessage, false);
-
-                        // Step 2: Immediately trigger the search
-                        triggerPendingSearch(data.thread_id);
-                    } else {
-                        // Regular response handling
-                        removeTypingIndicator();
-                        isTyping = false;
-                        updateSendButton(false);
-                        let botResponse = data.response || "⚠️ Error: No response received.";
-                        botResponse = botResponse.replace(/\n/g, '<br>');
-                        addMessage(botResponse, false);
-                    }
+                    // Regular response handling
+                    removeTypingIndicator();
+                    isTyping = false;
+                    updateSendButton(false);
+                    let botResponse = data.response || "⚠️ Error: No response received.";
+                    botResponse = botResponse.replace(/\n/g, '<br>');
+                    addMessage(botResponse, false);
                 })
                 .catch(error => {
                     removeTypingIndicator();
@@ -762,42 +751,7 @@
                 });
         }
 
-        // Function to trigger pending search after showing wait message
-        function triggerPendingSearch(threadId) {
-            // Show typing indicator for search execution
-            showTypingIndicator();
 
-            fetch("/continue_search", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ thread_id: threadId }),
-            })
-                .then(response => response.json())
-                .then(data => {
-                    removeTypingIndicator();
-                    isTyping = false;
-                    updateSendButton(false);
-                    console.log("Search results:", data);
-
-                    if (data.response) {
-                        let searchResults = data.response.replace(/\n/g, '<br>');
-                        addMessage(searchResults, false);
-                    } else if (data.error) {
-                        addMessage("❌ " + data.error, false);
-                    } else {
-                        addMessage("⚠️ Error: No search results received.", false);
-                    }
-                })
-                .catch(error => {
-                    removeTypingIndicator();
-                    isTyping = false;
-                    updateSendButton(false);
-                    console.error("Search error:", error);
-                    addMessage("❌ Error: Unable to complete search", false);
-                });
-        }
 
         function updateSendButton(disabled) {
             const sendButton = document.querySelector('.send-button');
