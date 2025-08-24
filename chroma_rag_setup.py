@@ -451,8 +451,8 @@ Address: {city_name}
                 # Skip bedrooms/bathrooms for now as requested
                 pass  # No filters applied at ChromaDB level for now
 
-            # 1. Get more candidates for MMR processing (RAG pipeline)
-            fetch_k = 1000  # Fixed fetch_k as requested
+            # 1. Get candidates for MMR processing (RAG pipeline) - reduced for performance
+            fetch_k = 100  # Reduced from 1000 to 100 for better performance
             
             # Use separate where clauses for ChromaDB compatibility
             if where_clauses:
@@ -485,22 +485,22 @@ Address: {city_name}
                 logger.info(f"📊 Found {len(results['documents'][0])} documents from ChromaDB")
                 
                 try:
-                    # Generate query embedding for MMR
+                    # Generate query embedding for MMR (cached to avoid redundant calls)
                     query_embedding = self.embedder.embed(query)
                     logger.info("✅ Generated query embedding")
                     
-                    # Get embeddings from results or generate them
+                    # Get embeddings from results - prefer ChromaDB embeddings to avoid regeneration
                     embeddings = None
                     if 'embeddings' in results and results['embeddings'] is not None and len(results['embeddings']) > 0 and len(results['embeddings'][0]) > 0:
                         embeddings = results['embeddings'][0]
                         logger.info(f"✅ Found {len(embeddings)} embeddings from ChromaDB")
                     else:
-                        logger.warning("⚠️ No embeddings returned from ChromaDB")
+                        logger.warning("⚠️ No embeddings returned from ChromaDB - this will cause performance issues")
                     
                     if embeddings is not None and len(embeddings) > 0:
-                        # Apply MMR algorithm for optimal diversity
+                        # Apply MMR algorithm for optimal diversity - reduced k for performance
                         from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=50, lambda_param=0.9)  # Favor relevance over diversity
+                        mmr_indices = mmr(query_embedding, embeddings, k=20, lambda_param=0.9)  # Reduced from 50 to 20 for better performance
                         logger.info(f"✅ MMR selected {len(mmr_indices)} indices: {mmr_indices}")
                         
                         # Get MMR-optimized results
@@ -698,8 +698,8 @@ Address: {city_name}
                     # Note: Location filtering would need to be done post-search since it's in the document text
                     pass
 
-            # 1. Get more candidates for MMR processing (RAG pipeline)
-            fetch_k = 1000  # Fixed fetch_k as requested
+            # 1. Get candidates for MMR processing (RAG pipeline) - reduced for performance
+            fetch_k = 100  # Reduced from 1000 to 100 for better performance
             
             # Use separate where clauses for ChromaDB compatibility
             if where_clauses:
@@ -738,9 +738,9 @@ Address: {city_name}
                         embeddings = results['embeddings'][0]
                     
                     if embeddings is not None and len(embeddings) > 0:
-                        # Apply MMR algorithm for optimal diversity
+                        # Apply MMR algorithm for optimal diversity - reduced k for performance
                         from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=50, lambda_param=0.8)  # Increased k to 50 for more results
+                        mmr_indices = mmr(query_embedding, embeddings, k=20, lambda_param=0.8)  # Reduced from 50 to 20 for better performance
                         
                         # Get MMR-optimized results
                         mmr_results = []
