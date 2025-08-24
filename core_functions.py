@@ -6,7 +6,7 @@ import time
 import config
 import functions
 import variables
-from memory import get_memory
+from memory_manager import memory_manager
 
 
 
@@ -315,5 +315,6 @@ def get_resource_files():
             if os.path.isfile(file_path):
                 file_paths.append(file_path)
     return file_paths
+
 
 
