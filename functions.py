@@ -10,6 +10,7 @@ from Cache_code import load_from_cache,append_to_cache,save_to_cache
 from datetime import datetime
 import json
 import variables
+import time
 
 from variables import EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, TEAM_EMAIL
 
@@ -72,17 +73,15 @@ def send_email(to_email, subject, body):
     msg.attach(MIMEText(body, 'plain'))
 
     try:
-        print(f"📧 Attempting to send email to: {to_email}")
-        print(f"📧 Subject: {subject}")
-        server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_USER, to_email, msg.as_string())
-        server.quit()
-        print(f"✅ Email sent successfully to: {to_email}")
+        logging.info(f"📧 Attempting to send email to: {to_email}")
+        with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT, timeout=10) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_USER, to_email, msg.as_string())
+        logging.info(f"✅ Email sent successfully to: {to_email}")
         return True
     except Exception as e:
-        print(f"❌ Failed to send email: {e}")
+        logging.error(f"❌ Failed to send email: {e}")
         return False
 from session_store import get_session
 
@@ -109,24 +108,46 @@ def schedule_viewing(arguments):
             "message": "📅 من فضلك اختر تاريخ ووقت للمعاينة، وهل تفضل الاجتماع عبر زووم أم زيارة ميدانية؟"
         }
 
+    # 🔥 ENHANCED: Store client information in conversation cache immediately
+    try:
+        store_client_info_in_conversation(conversation_id, client_id, {
+            'name': name,
+            'phone': phone,
+            'email': email,
+            'meeting_date': desired_date,
+            'meeting_time': desired_time,
+            'meeting_type': meeting_type,
+            'property_id': property_id
+        })
+        logging.info(f"✅ Stored client info in conversation cache: {name}, {phone}, {email}")
+    except Exception as e:
+        logging.error(f"❌ Failed to store client info: {e}")
+
     developer_name = get_developer_name_from_database(property_id) or "Unknown Developer"
     property_name = get_property_name_from_database(property_id) or "Unknown Property"
 
-    summary = advanced_conversation_summary_from_db(client_id, conversation_id, name, property_id)
+    # 🔥 ENHANCED: Use improved summary function that includes client details
+    summary = enhanced_conversation_summary_with_client_info(
+        client_id, conversation_id, name, phone, email, 
+        desired_date, desired_time, meeting_type, property_id
+    )
 
-    subject = f"🔔 معاينة وحدة جديدة - ID {property_id}"
+    subject = f"🔔 معاينة وحدة جديدة - {name} - {meeting_type}"
     body = f"""
     📝 معلومات العميل:
-    - client id : {client_id}
-    - Name : {name}
-    - Phone : {phone}
-    - Email: {email}
-    - property_id :{property_id}
-    - Unit Name: {property_name}
-    - Devloper : {developer_name}
-    - Meeting type: {meeting_type}
-    - Date : {desired_date}
-    - Time : {desired_time}
+    - **الاسم:** {name}
+    - **رقم الهاتف:** {phone}
+    - **البريد الإلكتروني:** {email}
+    - **معرف العميل:** {client_id}
+    - **معرف المحادثة:** {conversation_id}
+    
+    📋 تفاصيل الموعد:
+    - **نوع الاجتماع:** {meeting_type}
+    - **التاريخ:** {desired_date}
+    - **الوقت:** {desired_time}
+    - **معرف العقار:** {property_id}
+    - **اسم العقار:** {property_name}
+    - **المطور:** {developer_name}
     
     # 🔎 ملخص المحادثة:
     {summary}
@@ -210,6 +231,8 @@ def search_new_launches(arguments):
             semantic_parts.append(compound)
         
         query_text = " ".join(semantic_parts) if semantic_parts else "new launch properties"
+
+
 
         # Use RAG (Chroma) semantic search for new launches
         from chroma_rag_setup import get_rag_instance
@@ -576,6 +599,10 @@ def property_search(arguments):
     Search for existing property units using ChromaDB with MMR search and semantic search.
     This function does NOT use cache - it searches directly from ChromaDB.
     """
+    import time
+    start_time = time.time()
+    max_execution_time = 8.0  # 8 seconds timeout
+    
     try:
         # Mandatory fields
         location = arguments.get("location", "").strip().lower()
@@ -611,6 +638,14 @@ def property_search(arguments):
                 "message": "محتاج منك معلومات أساسية قبل ما أبدأ البحث: " + ", ".join(missing_fields) + ".\n" \
                            + "- مثال للميزانية: 4,000,000 أو 4 مليون\n" \
                            + "- ممكن كمان تقولّي كمبوند مفضل لو حابب (اختياري)",
+                "results": []
+            }
+        
+        # Check timeout
+        if time.time() - start_time > max_execution_time:
+            return {
+                "source": "timeout",
+                "message": "عذراً، البحث استغرق وقت طويل. جرب تقليل نطاق البحث أو تحديث الصفحة.",
                 "results": []
             }
         
@@ -651,6 +686,14 @@ def property_search(arguments):
         # Create semantic search query
         search_query = " ".join(search_query_parts) if search_query_parts else "property units"
         
+        # Check timeout before ChromaDB search
+        if time.time() - start_time > max_execution_time:
+            return {
+                "source": "timeout",
+                "message": "عذراً، البحث استغرق وقت طويل. جرب تقليل نطاق البحث أو تحديث الصفحة.",
+                "results": []
+            }
+        
         try:
             # Import and use the proper ChromaDB RAG system
             from chroma_rag_setup import get_rag_instance
@@ -683,9 +726,24 @@ def property_search(arguments):
             if compound_name:
                 filters["query_compound"] = compound_name
             
-            # Perform semantic search using ChromaDB with MMR
-            # Get more results initially for MMR processing
-            initial_results = rag.search_units(search_query, n_results=50, filters=filters)
+            # Check timeout before search
+            if time.time() - start_time > max_execution_time:
+                return {
+                    "source": "timeout",
+                    "message": "عذراً، البحث استغرق وقت طويل. جرب تقليل نطاق البحث أو تحديث الصفحة.",
+                    "results": []
+                }
+            
+            # Perform semantic search using ChromaDB with MMR - reduced n_results for performance
+            initial_results = rag.search_units(search_query, n_results=20, filters=filters)  # Reduced from 50 to 20
+            
+            # Check timeout after search
+            if time.time() - start_time > max_execution_time:
+                return {
+                    "source": "timeout",
+                    "message": "عذراً، البحث استغرق وقت طويل. جرب تقليل نطاق البحث أو تحديث الصفحة.",
+                    "results": []
+                }
             
             if not initial_results:
                 return {
@@ -699,6 +757,10 @@ def property_search(arguments):
             # Convert ChromaDB results to the format expected by the system
             formatted_results = []
             for result in initial_results:
+                # Check timeout during processing
+                if time.time() - start_time > max_execution_time:
+                    break
+                    
                 # Extract the document content and metadata
                 doc_content = result.get('document', '')
                 metadata = result.get('metadata', {})
@@ -746,6 +808,10 @@ def property_search(arguments):
                     return False
             
             for item in diversified_results:
+                # Check timeout during filtering
+                if time.time() - start_time > max_execution_time:
+                    break
+                    
                 # Exclude previously shown units for progressive search
                 item_id = str(item.get('id', ''))
                 if item_id in excluded_ids:
@@ -760,6 +826,14 @@ def property_search(arguments):
                 # No additional filtering needed as ChromaDB's semantic search handles this accurately
 
                 filtered_results.append(item)
+            
+            # Check timeout before formatting
+            if time.time() - start_time > max_execution_time:
+                return {
+                    "source": "timeout",
+                    "message": "عذراً، البحث استغرق وقت طويل. جرب تقليل نطاق البحث أو تحديث الصفحة.",
+                    "results": []
+                }
             
             # -------------------- Format Results for UI --------------------
             def format_unit(item, index):
@@ -789,6 +863,10 @@ def property_search(arguments):
             # Quality check: Ensure results are truly relevant
             quality_filtered_results = []
             for result in filtered_results:
+                # Check timeout during quality filtering
+                if time.time() - start_time > max_execution_time:
+                    break
+                    
                 # Check if result has minimum quality indicators
                 result_text = str(result.get('name_ar', '') or result.get('name_en', '') or result.get('document', '')).lower()
                 
@@ -906,12 +984,16 @@ def property_search(arguments):
                         "shown_ids": shown_ids
                     }
                 
+                execution_time = time.time() - start_time
+                logging.info(f"⏱️ Property search completed in {execution_time:.2f} seconds")
+                
                 return {
                     "source": "chromadb_semantic_search_mmr",
                     "message": intro_msg,
                     "results": formatted_lines,
                     "follow_up": follow_up_msg,
-                    "similarity_scores": similarity_scores
+                    "similarity_scores": similarity_scores,
+                    "execution_time": execution_time
                 }
             
         except ImportError as e:
@@ -1710,206 +1792,83 @@ def insight_search(arguments):
             "error": f"❌ حصل خطأ أثناء معالجة الاستفسار: {str(e)}"
         }
 
-def extract_client_preferences_llm(user_message, conversation_history=None, current_preferences=None, conversation_path=None):
+def extract_client_preferences_llm(user_message, conversation_history, current_preferences, conversation_path):
     """
-    Intelligently extract client preferences using LLM, maintaining state across conversation turns.
-    This function analyzes the user's intent and extracts preferences without relying solely on rigid keywords.
-    Enhanced for step-by-step conversation flow.
-    
-    Args:
-        user_message (str): Current user message
-        conversation_history (list): List of previous messages in the conversation
-        current_preferences (dict): Previously extracted preferences to build upon
-        conversation_path (str): Either "new_launches" or "available_units" to determine required fields
-    
-    Returns:
-        dict: Updated preferences with new information and missing_required_fields list
+    Enhanced client preferences extraction with real-time client info tracking
     """
     try:
-        import google.generativeai as genai
-        from variables import GEMINI_API_KEY
+        # Extract client info from current message
+        current_client_info = extract_client_info_from_message(user_message)
         
-        # Set up Gemini
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        # Combine with existing preferences
+        enhanced_preferences = current_preferences.copy()
         
-        # Build context from conversation history and current preferences
-        context = ""
-        if conversation_history:
-            context += "المحادثة السابقة:\n"
-            for msg in conversation_history[-5:]:  # Last 5 messages for context
-                context += f"- {msg}\n"
-            context += "\n"
+        # Update with new client info if found
+        if current_client_info:
+            enhanced_preferences.update(current_client_info)
         
-        if current_preferences:
-            context += "التفضيلات الحالية:\n"
-            for key, value in current_preferences.items():
-                if value and value != 0:
-                    context += f"- {key}: {value}\n"
-            context += "\n"
+        # Use existing LLM extraction for other preferences
+        llm_preferences = extract_client_preferences(user_message)
+        enhanced_preferences.update(llm_preferences)
         
-        # Create intelligent prompt for preference extraction
-        path_instructions = ""
-        if conversation_path == "new_launches":
-            path_instructions = """
-            **مسار الإطلاقات الجديدة - الحقول المطلوبة:**
-            - نوع العقار (إلزامي)
-            - الموقع (إلزامي)
-            - اسم الكمبوند (اختياري)
-            """
-        elif conversation_path == "available_units":
-            path_instructions = """
-            **مسار الوحدات المتاحة - الحقول المطلوبة:**
-            - نوع العقار (إلزامي)
-            - الموقع (إلزامي)
-            - الميزانية (إلزامي)
-            - اسم الكمبوند المفضل (اختياري)
-            - عدد الغرف (اختياري)
-            - عدد الحمامات (اختياري)
-            - نوع الاستلام (اختياري)
-            """
+        logging.info(f"✅ Extracted client info: {current_client_info}")
+        logging.info(f"✅ Enhanced preferences: {enhanced_preferences}")
         
-        prompt = f"""
-        أنت مساعد ذكي لاستخراج تفضيلات العملاء في مجال العقارات.
-        
-        {context}
-        
-        {path_instructions}
-        
-        رسالة العميل الحالية: "{user_message}"
-        
-        استخرج التفضيلات التالية من الرسالة، مع مراعاة السياق والمحادثة السابقة:
-        
-        1. **نوع العقار**: شقة، فيلا، دوبلكس، بنتهاوس، تجاري، إلخ
-        2. **الموقع**: المدينة أو المنطقة المطلوبة
-        3. **الميزانية**: المبلغ المتاح (بالدولار أو الجنيه)
-        4. **عدد الغرف**: عدد غرف النوم المطلوبة
-        5. **عدد الحمامات**: عدد الحمامات المطلوبة
-        6. **المساحة**: المساحة المطلوبة (متر مربع)
-        7. **نوع الاستلام**: جاهز للاستلام، تحت الإنشاء، قريباً
-        8. **نوع الدفع**: كاش، تقسيط، سنوات التقسيط
-        9. **الغرض**: سكن، استثمار، تأجير
-        10. **مواصفات إضافية**: أي متطلبات خاصة
-        11. **اسم الكمبوند**: اسم الكمبوند المطلوب
-        
-        اكتب الإجابة بالتنسيق التالي:
-        نوع_العقار: [القيمة]
-        الموقع: [القيمة]
-        الميزانية: [القيمة]
-        عدد_الغرف: [القيمة]
-        عدد_الحمامات: [القيمة]
-        المساحة: [القيمة]
-        نوع_الاستلام: [القيمة]
-        نوع_الدفع: [القيمة]
-        الغرض: [القيمة]
-        مواصفات_إضافية: [القيمة]
-        اسم_الكمبوند: [القيمة]
-        
-        إذا لم يتم ذكر قيمة، اكتب "غير محدد"
-        """
-        
-        # Get LLM response
-        response = model.generate_content(prompt)
-        result = response.text
-        
-        # Parse the response
-        preferences = {
-            "property_type": "",
-            "location": "",
-            "budget": 0,
-            "bedrooms": 0,
-            "bathrooms": 0,
-            "apartment_area": "",
-            "delivery_type": "",
-            "payment_type": "",
-            "purpose": "",
-            "additional_specs": "",
-            "compound_name": ""
-        }
-        
-        # Parse LLM response
-        lines = result.strip().split('\n')
-        for line in lines:
-            if ':' in line:
-                key, value = line.split(':', 1)
-                key = key.strip().lower()
-                value = value.strip()
-                
-                if 'نوع_العقار' in key or 'property_type' in key:
-                    preferences["property_type"] = value if value != "غير محدد" else ""
-                elif 'الموقع' in key or 'location' in key:
-                    preferences["location"] = value if value != "غير محدد" else ""
-                elif 'الميزانية' in key or 'budget' in key:
-                    if value != "غير محدد":
-                        # Extract numeric value
-                        import re
-                        budget_match = re.search(r'(\d+(?:,\d{3})*)', value)
-                        if budget_match:
-                            budget_str = budget_match.group(1).replace(',', '')
-                            if 'مليون' in value or 'million' in value:
-                                preferences["budget"] = int(budget_str) * 1_000_000
-                            elif 'ألف' in value or 'thousand' in value:
-                                preferences["budget"] = int(budget_str) * 1_000
-                            else:
-                                preferences["budget"] = int(budget_str)
-                elif 'عدد_الغرف' in key or 'bedrooms' in key:
-                    if value != "غير محدد":
-                        import re
-                        room_match = re.search(r'(\d+)', value)
-                        if room_match:
-                            preferences["bedrooms"] = int(room_match.group(1))
-                elif 'عدد_الحمامات' in key or 'bathrooms' in key:
-                    if value != "غير محدد":
-                        import re
-                        bath_match = re.search(r'(\d+)', value)
-                        if bath_match:
-                            preferences["bathrooms"] = int(bath_match.group(1))
-                elif 'المساحة' in key or 'area' in key:
-                    preferences["apartment_area"] = value if value != "غير محدد" else ""
-                elif 'نوع_الاستلام' in key or 'delivery' in key:
-                    preferences["delivery_type"] = value if value != "غير محدد" else ""
-                elif 'نوع_الدفع' in key or 'payment' in key:
-                    preferences["payment_type"] = value if value != "غير محدد" else ""
-                elif 'الغرض' in key or 'purpose' in key:
-                    preferences["purpose"] = value if value != "غير محدد" else ""
-                elif 'مواصفات_إضافية' in key or 'additional' in key:
-                    preferences["additional_specs"] = value if value != "غير محدد" else ""
-                elif 'اسم_الكمبوند' in key or 'compound' in key:
-                    preferences["compound_name"] = value if value != "غير محدد" else ""
-        
-        # Merge with existing preferences (new info overrides old)
-        if current_preferences:
-            for key in preferences:
-                if preferences[key] and preferences[key] != 0 and preferences[key] != "":
-                    current_preferences[key] = preferences[key]
-            final_preferences = current_preferences
-        else:
-            final_preferences = preferences
-        
-        # Determine missing required fields based on conversation path
-        missing_required_fields = []
-        if conversation_path == "new_launches":
-            if not final_preferences.get("property_type"):
-                missing_required_fields.append("نوع العقار")
-            if not final_preferences.get("location"):
-                missing_required_fields.append("الموقع")
-        elif conversation_path == "available_units":
-            if not final_preferences.get("property_type"):
-                missing_required_fields.append("نوع العقار")
-            if not final_preferences.get("location"):
-                missing_required_fields.append("الموقع")
-            if not final_preferences.get("budget") or final_preferences.get("budget") == 0:
-                missing_required_fields.append("الميزانية")
-        
-        # Add missing fields to the result
-        final_preferences["missing_required_fields"] = missing_required_fields
-        
-        return final_preferences
+        return enhanced_preferences
         
     except Exception as e:
-        print(f"🚨 Error in LLM preference extraction: {e}")
-        # Fallback to keyword-based extraction
-        return extract_client_preferences(user_message)
+        logging.error(f"❌ Error in enhanced preferences extraction: {e}")
+        return extract_client_preferences(user_message)  # Fallback to original function
+
+
+def extract_client_info_from_message(message):
+    """
+    Extract client information (name, phone, email) from a message
+    """
+    import re
+    
+    client_info = {}
+    
+    # Extract phone numbers (Egyptian format)
+    phone_patterns = [
+        r'(\+20\s?1[0-9]{9})',  # +20 1xxxxxxxxx
+        r'(01[0-9]{9})',        # 01xxxxxxxxx
+        r'(1[0-9]{9})',         # 1xxxxxxxxx
+    ]
+    
+    for pattern in phone_patterns:
+        phone_match = re.search(pattern, message)
+        if phone_match:
+            client_info['phone'] = phone_match.group(1)
+            break
+    
+    # Extract email addresses
+    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    email_match = re.search(email_pattern, message)
+    if email_match:
+        client_info['email'] = email_match.group(0)
+    
+    # Extract names (common Arabic/English names)
+    # Look for patterns like "اسمي أحمد" or "أنا محمد" or "I am John"
+    name_patterns = [
+        r'اسمي\s+([^\s،.]+)',  # اسمي أحمد
+        r'أنا\s+([^\s،.]+)',   # أنا محمد
+        r'I am\s+([^\s,.-]+)', # I am John
+        r'my name is\s+([^\s,.-]+)', # my name is John
+        r'اسمي\s+([^\s،.]+)\s+([^\s،.]+)',  # اسمي أحمد محمد
+        r'أنا\s+([^\s،.]+)\s+([^\s،.]+)',   # أنا محمد أحمد
+    ]
+    
+    for pattern in name_patterns:
+        name_match = re.search(pattern, message, re.IGNORECASE)
+        if name_match:
+            if len(name_match.groups()) == 1:
+                client_info['name'] = name_match.group(1)
+            elif len(name_match.groups()) == 2:
+                client_info['name'] = f"{name_match.group(1)} {name_match.group(2)}"
+            break
+    
+    return client_info
 
 
 def get_conversation_preferences(conversation_id, user_id):
@@ -2790,5 +2749,251 @@ def get_unit_details(arguments):
             "error": f"❌ خطأ في عرض تفاصيل الوحدة: {str(e)}"
         }
 
+def store_client_info_in_conversation(conversation_id, client_id, client_info):
+    """
+    Store client information in the conversation cache for better tracking
+    """
+    try:
+        conversations = load_from_cache("conversations_cache.json")
+        
+        # Find the conversation
+        convo = next(
+            (c for c in conversations if str(c.get("conversation_id")) == str(conversation_id)),
+            None
+        )
+        
+        if convo:
+            # Add client info to conversation metadata
+            if "client_info" not in convo:
+                convo["client_info"] = {}
+            convo["client_info"].update(client_info)
+            
+            # Save back to cache
+            save_to_cache("conversations_cache.json", conversations)
+            logging.info(f"✅ Stored client info for conversation {conversation_id}")
+        else:
+            logging.warning(f"⚠️ Conversation {conversation_id} not found for storing client info")
+            
+    except Exception as e:
+        logging.error(f"❌ Error storing client info: {e}")
 
 
+def enhanced_conversation_summary_with_client_info(client_id, conversation_id, name, phone, email, 
+                                                  meeting_date, meeting_time, meeting_type, property_id):
+    """
+    Enhanced conversation summary that includes all client information and meeting details
+    """
+    try:
+        # Get the basic conversation summary
+        basic_summary = advanced_conversation_summary_from_db(client_id, conversation_id, name, property_id)
+        
+        # Create enhanced summary with client details
+        enhanced_summary = f"""
+**📋 معلومات العميل المحدثة:**
+- **الاسم:** {name}
+- **رقم الهاتف:** {phone}
+- **البريد الإلكتروني:** {email}
+- **معرف العميل:** {client_id}
+
+**📅 تفاصيل الموعد المحجوز:**
+- **نوع الاجتماع:** {meeting_type}
+- **التاريخ:** {meeting_date}
+- **الوقت:** {meeting_time}
+- **معرف العقار:** {property_id}
+
+**🔎 ملخص المحادثة:**
+{basic_summary}
+
+**⚠️ معلومات مهمة للفريق:**
+- العميل طلب {meeting_type} في {meeting_date} الساعة {meeting_time}
+- يجب التواصل مع العميل قبل الموعد بـ 24 ساعة للتأكيد
+- إعداد معلومات مفصلة عن العقار رقم {property_id}
+- التأكد من توفر فريق المبيعات في الموعد المحدد
+"""
+        
+        return enhanced_summary
+        
+    except Exception as e:
+        logging.error(f"❌ Error creating enhanced summary: {e}")
+        return f"""
+**📋 معلومات العميل:**
+- **الاسم:** {name}
+- **رقم الهاتف:** {phone}
+- **البريد الإلكتروني:** {email}
+- **معرف العميل:** {client_id}
+
+**📅 تفاصيل الموعد:**
+- **نوع الاجتماع:** {meeting_type}
+- **التاريخ:** {meeting_date}
+- **الوقت:** {meeting_time}
+- **معرف العقار:** {property_id}
+
+**❌ ملاحظة:** حدث خطأ في استرجاع ملخص المحادثة التفصيلي.
+"""
+
+
+def advanced_conversation_summary_from_db(client_id, conversation_id, name="Unknown", property_id="Unknown"):
+    """
+    Fetch conversation from cache (new structure), summarize it using OpenAI, and return the summary.
+    """
+    try:
+        # 1️⃣ Load cached conversations
+        conversations = load_from_cache("conversations_cache.json")
+
+        # 2️⃣ Find the matching conversation - try multiple lookup strategies
+        convo = None
+        
+        # Strategy 1: Exact match on conversation_id and user_id
+        convo = next(
+            (c for c in conversations if str(c["conversation_id"]) == str(conversation_id) and str(c["user_id"]) == str(client_id)),
+            None
+        )
+        
+        # Strategy 2: If not found, try just conversation_id match
+        if not convo:
+            convo = next(
+                (c for c in conversations if str(c["conversation_id"]) == str(conversation_id)),
+                None
+            )
+        
+        # Strategy 3: If still not found, try user_id match
+        if not convo:
+            convo = next(
+                (c for c in conversations if str(c["user_id"]) == str(client_id)),
+                None
+            )
+
+        if not convo:
+            # Debug: Log what we're looking for and what's available
+            logging.warning(f"🔍 Conversation lookup failed:")
+            logging.warning(f"   Looking for: conversation_id='{conversation_id}', client_id='{client_id}'")
+            logging.warning(f"   Available conversations: {len(conversations)}")
+            if conversations:
+                sample_convo = conversations[0]
+                logging.warning(f"   Sample conversation: conversation_id='{sample_convo.get('conversation_id')}', user_id='{sample_convo.get('user_id')}'")
+            # Return a basic summary when no conversation is found
+            return f"ملخص المحادثة: العميل {name} (ID: {client_id}) طلب معاينة للعقار {property_id}. لم يتم العثور على محادثة مفصلة في الذاكرة المؤقتة."
+
+        conversation_data = convo.get("description", [])
+        if not isinstance(conversation_data, list):
+            conversation_data = json.loads(conversation_data)
+
+        # 3️⃣ Format conversation for prompt
+        formatted_conversation = "\n".join(
+            f"{msg['sender']}: {msg['message']}" for msg in conversation_data
+        )
+
+        # 4️⃣ Create Arabic prompt for summarization with enhanced system instructions
+        prompt = f"""
+        أنت مساعد مبيعات عقاري محترف ومتخصص في تلخيص المحادثات العقارية. مهمتك هي تحليل المحادثة التالية وتقديم ملخص شامل ومفيد لفريق المبيعات.
+
+        **تعليمات النظام:**
+        - استخدم اللهجة المصرية المحترفة
+        - ركز على المعلومات العملية والمفيدة لفريق المبيعات
+        - اكتب الملخص بشكل منظم وواضح
+        - استخدم النقاط والتنسيق المناسب
+        - اذكر الأرقام والتواريخ بدقة
+
+        **المعلومات المطلوبة في الملخص:**
+        1. **معلومات العميل الأساسية:**
+           - نوع العميل (جديد/متكرر)
+           - مستوى الاهتمام (عالٍ/متوسط/منخفض)
+
+        2. **متطلبات العقار:**
+           - نوع العقار المطلوب (شقة/فيلا/تجاري)
+           - الموقع المفضل
+           - الميزانية المتوقعة
+           - عدد الغرف والحمامات
+           - المساحة المطلوبة
+
+        3. **تفضيلات إضافية:**
+           - الكمبوند المفضل
+           - نوع الاستلام (جاهز/تحت الإنشاء)
+           - نظام الدفع المفضل
+           - الغرض من الشراء (سكن/استثمار)
+
+        4. **نقاط مهمة:**
+           - أي اعتراضات أو مخاوف
+           - المواعيد المفضلة للمعاينة
+           - أي طلبات خاصة
+           - مستوى الاستعجال
+
+        5. **الخطوات التالية المقترحة:**
+           - نوع المتابعة المطلوبة
+           - أفضل وقت للتواصل
+
+        **المحادثة:**
+        {formatted_conversation}
+
+        **الملخص:**
+        """
+
+        print(f"📋 Prompt for summarization: {prompt}")
+
+        # 5️⃣ Generate summary with Gemini
+        try:
+            # Configure Gemini with API key
+            api_key = os.environ.get('GEMINI_API_KEY')
+            if not api_key:
+                return "❌ GEMINI_API_KEY environment variable is not set"
+            
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
+            
+            # Create the prompt for Gemini with enhanced system instructions
+            gemini_prompt = f"""
+            أنت مساعد مبيعات عقاري محترف ومتخصص في تلخيص المحادثات العقارية. مهمتك هي تحليل المحادثة التالية وتقديم ملخص شامل ومفيد لفريق المبيعات.
+
+            **تعليمات النظام:**
+            - استخدم اللهجة المصرية المحترفة
+            - ركز على المعلومات العملية والمفيدة لفريق المبيعات
+            - اكتب الملخص بشكل منظم وواضح
+            - استخدم النقاط والتنسيق المناسب
+            - اذكر الأرقام والتواريخ بدقة
+
+            **المعلومات المطلوبة في الملخص:**
+            1. **معلومات العميل الأساسية:**
+               - نوع العميل (جديد/متكرر)
+               - مستوى الاهتمام (عالٍ/متوسط/منخفض)
+
+            2. **متطلبات العقار:**
+               - نوع العقار المطلوب (شقة/فيلا/تجاري)
+               - الموقع المفضل
+               - الميزانية المتوقعة
+               - عدد الغرف والحمامات
+               - المساحة المطلوبة
+
+            3. **تفضيلات إضافية:**
+               - الكمبوند المفضل
+               - نوع الاستلام (جاهز/تحت الإنشاء)
+               - نظام الدفع المفضل
+               - الغرض من الشراء (سكن/استثمار)
+
+            4. **نقاط مهمة:**
+               - أي اعتراضات أو مخاوف
+               - المواعيد المفضلة للمعاينة
+               - أي طلبات خاصة
+               - مستوى الاستعجال
+
+            5. **الخطوات التالية المقترحة:**
+               - نوع المتابعة المطلوبة
+               - أفضل وقت للتواصل
+
+            **المحادثة:**
+            {formatted_conversation}
+
+            **الملخص:**
+            """
+            
+            response = model.generate_content(gemini_prompt)
+            summary = response.text.strip()
+            print(f"📝 Generated summary: {summary}")
+            return summary
+            
+        except Exception as e:
+            print(f"🚨 Error generating summary with Gemini: {e}")
+            return f"❌ حصل خطأ أثناء تلخيص المحادثة: {e}"
+
+    except Exception as e:
+        print(f"🚨 Error generating summary: {e}")
+        return f"❌ حصل خطأ أثناء تلخيص المحادثة: {e}"
