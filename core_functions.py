@@ -148,10 +148,17 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         
         # Get conversation context using LangChain memory
         context = get_conversation_context(session_id)
-        
+
         # Extract new preferences from current message
         new_preferences = extract_user_preferences_from_message(user_message)
-        
+
+        if new_preferences:
+            merged_preferences = {
+                **context.get("preferences", {}),
+                **{k: v for k, v in new_preferences.items() if v}
+            }
+            update_conversation_context(session_id, "preferences", merged_preferences)
+
         # Get updated context after preference update
         context = get_conversation_context(session_id)
         
@@ -180,7 +187,7 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         
         # Generate response from Gemini with automatic function calling
         logging.info(f"Generating response for user message: {user_message[:100]}...")
-        response = model.generate_content(full_prompt)
+        response = await asyncio.to_thread(model.generate_content, full_prompt)
         
         # Check if response contains function calls
         if hasattr(response, 'candidates') and response.candidates:
