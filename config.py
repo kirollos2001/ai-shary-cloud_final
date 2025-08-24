@@ -1,37 +1,61 @@
 import mysql.connector
-import requests
+#import requests
 import logging
 import os
 import variables
 import google.generativeai as genai
+import mysql.connector
+import logging
+import asyncio
+import time
+import aiohttp
+
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-def fetch_user_info_from_api():
-    """Fetch user information from external API."""
-    try:
-        response = requests.get("https://shary.eg/api/UserInfo", timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "user_id": data.get("id", 1),
-                "name": data.get("name", "Guest User"),
-                "email": data.get("email", "guest@example.com"),
-                "phone": data.get("phone", "Not Provided")
-            }
-        else:
-            logging.warning(f"API returned status code: {response.status_code}")
-    except Exception as e:
-        logging.error(f"❌ Error fetching user info: {e}")
-    
-    # Return default values if API fails
-    return {
-        "user_id": 1,
-        "name": "Guest User",
-        "email": "guest@example.com",
-        "phone": "Not Provided"
-    }
+_USER_INFO_CACHE = {"data": None, "expires_at": 0}
+_CACHE_TTL = 300  # seconds
+
+
+async def fetch_user_info_from_api():
+    """Fetch user information from external API using async HTTP with retries.
+
+    Raises:
+        RuntimeError: if the API request fails after retries.
+    """
+    now = time.time()
+    if _USER_INFO_CACHE["data"] and _USER_INFO_CACHE["expires_at"] > now:
+        return _USER_INFO_CACHE["data"]
+
+    url = "https://shary.eg/api/UserInfo"
+    backoff = 1
+    for attempt in range(3):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        result = {
+                            "user_id": data.get("id", 1),
+                            "name": data.get("name", "Guest User"),
+                            "email": data.get("email", "guest@example.com"),
+                            "phone": data.get("phone", "Not Provided"),
+                        }
+                        _USER_INFO_CACHE["data"] = result
+                        _USER_INFO_CACHE["expires_at"] = time.time() + _CACHE_TTL
+                        return result
+                    logging.warning(
+                        f"API returned status code: {response.status} (attempt {attempt + 1})"
+                    )
+        except Exception as e:
+            logging.error(f"❌ Error fetching user info (attempt {attempt + 1}): {e}")
+        await asyncio.sleep(backoff)
+        backoff *= 2
+
+    raise RuntimeError("Failed to fetch user info from API")
+
 
 def get_db_connection():
     """Establish and return a MySQL database connection using TCP/IP with connection pooling."""
@@ -119,15 +143,7 @@ assistant_instructions = """
 
 **عندما تجمع المعلومات الأساسية:**
 
-⚠️ **مهم جداً - إرسال رسالتين منفصلتين:**
-
-1. **الرسالة الأولى** (قبل البحث):
-   "✨ من فضلك يا فندم، اديني لحظات أراجع البيانات وأجيبلك أنسب الإطلاقات الجديدة."
-
-2. **الرسالة الثانية** (بعد البحث):
-   استخدم search_new_launches واعرض النتائج
-
-**لا تدمج الرسالتين في رسالة واحدة - يجب أن تكونا منفصلتين**
+استخدم search_new_launches مباشرة واعرض النتائج
 
 اعرض النتائج بالصيغة:
 - {name} | {city} | {compound} | ID: {id}
@@ -163,15 +179,7 @@ assistant_instructions = """
 
 **عندما تجمع المعلومات الأساسية:**
 
-⚠️ **مهم جداً - إرسال رسالتين منفصلتين:**
-
-1. **الرسالة الأولى** (قبل البحث):
-   "✨ من فضلك يا فندم، اديني لحظات أراجع البيانات وأجيبلك أنسب الوحدات."
-
-2. **الرسالة الثانية** (بعد البحث):
-   استخدم property_search واعرض النتائج
-
-**لا تدمج الرسالتين في رسالة واحدة - يجب أن تكونا منفصلتين**
+استخدم property_search مباشرة واعرض النتائج
 
 اعرض النتائج بالصيغة:
 - {name_ar} | السعر: {price} | غرف: {bedrooms} | حمام: {bathrooms} | ID: {unit_id}
@@ -282,6 +290,12 @@ assistant_instructions = """
 عندما تجمع كل المعلومات التالية:
 ✅ الاسم + ✅ الهاتف + ✅ الإيميل + ✅ التاريخ + ✅ الوقت + ✅ نوع الاجتماع
 → **استخدم schedule_viewing فوراً ولا تنتظر!**
+
+**🔍 تتبع معلومات العميل:**
+- **احتفظ بمعلومات العميل** في كل رسالة (الاسم، الهاتف، الإيميل)
+- **استخدم المعلومات المحفوظة** عند حجز المواعيد
+- **تأكد من دقة المعلومات** قبل استخدام schedule_viewing
+- **لا تفقد معلومات العميل** أثناء المحادثة
 
 **أمثلة تتطلب استخدام schedule_viewing:**
 - "أيوه، عايز Zoom Meeting الأحد 6 مساءً"
