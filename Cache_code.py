@@ -2,6 +2,8 @@ import os
 import json
 import logging
 import time
+import tempfile
+from filelock import FileLock
 
 from config import get_db_connection
 
@@ -10,44 +12,47 @@ if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
 def save_to_cache(filename, data):
+    path = os.path.join(CACHE_DIR, filename)
+    lock = FileLock(path + ".lock")
     try:
-        path = os.path.join(CACHE_DIR, filename)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-        logging.info(f"✅ Saved to cache file: {path}")
+        with lock:
+            fd, tmp_path = tempfile.mkstemp(dir=CACHE_DIR)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+                    json.dump(data, tmp_file, ensure_ascii=False, indent=2, default=str)
+                os.replace(tmp_path, path)
+                logging.info(f"✅ Saved to cache file: {path}")
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
     except Exception as e:
         logging.error(f"❌ Failed to save {filename} to cache: {e}")
 
 def load_from_cache(filename):
     path = os.path.join(CACHE_DIR, filename)
+    lock = FileLock(path + ".lock")
     if os.path.exists(path):
-        try:
-            # Try UTF-8 first
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except UnicodeDecodeError as e:
-            logging.warning(f"UTF-8 decode error in {filename}: {e}")
-            # Return empty list and backup corrupted file immediately
-            backup_path = path + f".corrupted_{int(time.time())}"
+        for attempt in range(2):
             try:
-                os.rename(path, backup_path)
-                logging.warning(f"Backed up corrupted file to {backup_path}")
-            except Exception as e2:
-                logging.error(f"Failed to backup corrupted file: {e2}")
-            return []
-        except json.JSONDecodeError as e:
-            logging.error(f"JSON decode error in {filename}: {e}")
-            # Return empty list and backup corrupted file
-            backup_path = path + f".corrupted_{int(time.time())}"
-            try:
-                os.rename(path, backup_path)
-                logging.warning(f"Backed up corrupted JSON file to {backup_path}")
-            except Exception as e2:
-                logging.error(f"Failed to backup corrupted JSON file: {e2}")
-            return []
-        except Exception as e:
-            logging.error(f"Unexpected error loading {filename}: {e}")
-            return []
+                with lock:
+                    with open(path, "r", encoding="utf-8") as f:
+                        return json.load(f)
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                if attempt == 0:
+                    logging.warning(f"Decode error in {filename}, retrying once: {e}")
+                    time.sleep(0.1)
+                    continue
+                logging.error(f"JSON decode error in {filename}: {e}")
+                backup_path = path + f".corrupted_{int(time.time())}"
+                try:
+                    os.replace(path, backup_path)
+                    logging.warning(f"Backed up corrupted JSON file to {backup_path}")
+                except Exception as e2:
+                    logging.error(f"Failed to backup corrupted JSON file: {e2}")
+                return []
+            except Exception as e:
+                logging.error(f"Unexpected error loading {filename}: {e}")
+                return []
     return []
 
 def append_to_cache(filename, entry):
@@ -119,6 +124,7 @@ def enrich_units_with_names():
 import logging
 
 def cache_units_from_db():
+    from config import get_db_connection
     cursor = None
     connection = None
     try:
@@ -151,7 +157,7 @@ def cache_units_from_db():
         logging.info(f"✅ Saved {len(units)} units to cache (with compound names, media, and new_image)")
     except Exception as e:
         logging.error(f"❌ Failed to fetch units: {e}")
-        save_to_cache("cache/units.json", [])
+        save_to_cache("units.json", [])
     finally:
         if cursor:
             cursor.close()
