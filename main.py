@@ -22,6 +22,7 @@ import json
 import datetime
 import asyncio
 import atexit
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, render_template, request, jsonify
@@ -122,17 +123,7 @@ if not model:
 # -------------------------------------------------------
 executor = ThreadPoolExecutor(max_workers=4)
 
-def run_async_tool_calls(model, message, session_id):
-    """Wrapper to run async function in a thread"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        result = loop.run_until_complete(
-            core_functions.process_gemini_response_async(model, message, session_id)
-        )
-        return result
-    finally:
-        loop.close()
+
 
 # -------------------------------------------------------
 # Routes
@@ -144,7 +135,25 @@ def index():
 @app.route("/start", methods=["GET"])
 def start_conversation():
     logging.info("Starting a new conversation...")
-    client_info = config.fetch_user_info_from_api()
+
+    try:
+        # Try to fetch user info from API using thread pool
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            client_info = loop.run_until_complete(config.fetch_user_info_from_api())
+        finally:
+            loop.close()
+
+    except Exception as e:
+        logging.warning(f"Failed to fetch user info from API, using fallback: {e}")
+        client_info = {
+            "user_id": f"guest_{int(time.time())}",
+            "name": "Guest User",
+            "phone": "Not Provided",
+            "email": "guest@example.com",
+        }
+    
     config.client_sessions["active_client"] = client_info
     session_id = f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     logging.info(f"New session created with ID: {session_id}")
@@ -152,7 +161,7 @@ def start_conversation():
     return jsonify({"thread_id": session_id})
 
 @app.route("/chat", methods=["GET", "POST"])
-async def chat():
+def chat():
     if request.method == "GET":
         # Handle GET requests (e.g., for browser testing)
         return jsonify({
@@ -252,6 +261,34 @@ async def chat():
         conversation_path
     )
 
+    # 🔥 ENHANCED: Store client information in real-time
+    try:
+        # Update client info if new information is provided
+        updated_client_info = client_info.copy()
+        if extracted_info.get('name') and extracted_info['name'] != 'Unknown':
+            updated_client_info['name'] = extracted_info['name']
+        if extracted_info.get('phone') and extracted_info['phone'] != 'Unknown':
+            updated_client_info['phone'] = extracted_info['phone']
+        if extracted_info.get('email') and extracted_info['email'] != 'Unknown':
+            updated_client_info['email'] = extracted_info['email']
+        
+        # Store updated client info in conversation cache
+        functions.store_client_info_in_conversation(thread_id, user_id, {
+            'name': updated_client_info.get('name', 'Unknown'),
+            'phone': updated_client_info.get('phone', 'Unknown'),
+            'email': updated_client_info.get('email', 'Unknown'),
+            'last_updated': time.time()
+        })
+        
+        # Update session with new info
+        if updated_client_info != client_info:
+            save_session(thread_id, updated_client_info)
+            client_info = updated_client_info
+            
+        logging.info(f"✅ Updated client info: {updated_client_info.get('name')}, {updated_client_info.get('phone')}, {updated_client_info.get('email')}")
+    except Exception as e:
+        logging.error(f"❌ Failed to update client info: {e}")
+
     # Store lead data for later processing (after response is sent)
     lead_data = {
         "user_id": user_id,
@@ -265,24 +302,29 @@ async def chat():
         logging.info(
             f"Calling run_async_tool_calls with model, user_message, session_id={thread_id}"
         )
-        # Offload processing to thread pool and await result without blocking
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            executor, run_async_tool_calls, model, user_message, thread_id
-        )
+        # Use the thread pool executor to run the async function
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(
+                core_functions.process_gemini_response_async(model, user_message, thread_id)
+            )
+        finally:
+            loop.close()
         logging.info(f"Result from run_async_tool_calls: {result}")
 
         if result and "error" in result:
             bot_response = f"❌ خطأ: {result['error']}"
-        elif result and "wait_message" in result:
-            # Function call is in progress, show wait message
-            bot_response = result["wait_message"]
         elif result and "function_output" in result:
             function_output = result['function_output']
             function_name = result.get('function_name')
 
             if function_name == 'property_search':
-                if function_output.get('results'):
+                # Check if this is a validation message asking for more information
+                if function_output.get('source') == 'validation':
+                    # Display the validation message directly
+                    bot_response = function_output.get('message', 'محتاج منك معلومات إضافية للبحث.')
+                elif function_output.get('results'):
                     results = function_output.get('results', [])
                     real_results_str = ""
                     for line in results[:10]:
@@ -301,7 +343,8 @@ async def chat():
                     complete_response = f"{message}\n\n{real_results_str}\n{follow_up}".strip()
                     bot_response = complete_response
                 else:
-                    bot_response = f"✅ تم تنفيذ {function_name} بنجاح: {function_output}"
+                    # Handle other cases like no results or errors
+                    bot_response = function_output.get('message', f"✅ تم تنفيذ {function_name} بنجاح: {function_output}")
 
             elif function_name == 'search_new_launches':
                 message = function_output.get('message', '')
