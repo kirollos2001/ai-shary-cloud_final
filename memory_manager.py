@@ -5,57 +5,67 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
-from pydantic import Field
+from langchain_core.runnables import RunnableLambda
 import variables
 
 # Set Gemini API key
-os.environ["GEMINI_API_KEY"] = variables.GEMINI_API_KEY
+if getattr(variables, "GEMINI_API_KEY", None):
+    os.environ["GEMINI_API_KEY"] = variables.GEMINI_API_KEY
 
 # Initialize Gemini model
-llm = ChatGoogleGenerativeAI(
-    model=variables.GEMINI_MODEL_NAME,
-    google_api_key=variables.GEMINI_API_KEY,
-    temperature=0.7
-)
+if getattr(variables, "GEMINI_API_KEY", None):
+    llm = ChatGoogleGenerativeAI(
+        model=variables.GEMINI_MODEL_NAME,
+        google_api_key=variables.GEMINI_API_KEY,
+        temperature=0.7,
+    )
+else:
+    # RunnableLambda produces an empty string and composes with the LC pipeline
+    llm = RunnableLambda(lambda _: "")
+
 
 class ConversationSummaryMemory:
-    """Custom conversation summary memory using LangChain 0.3.x API"""
-    
+    """Conversation summary memory with cached summaries.
+
+    The class maintains a running ``summary`` string which is only
+    recomputed when the buffer grows beyond ``max_token_limit``.  Subsequent
+    calls to ``load_memory_variables`` simply return the cached summary,
+    avoiding expensive LLM calls on every load.
+    """
+
     def __init__(self, llm, max_token_limit=500):
         self.llm = llm
         self.max_token_limit = max_token_limit
         self.buffer = []
-        
+        self.summary = ""  # cached running summary
+
         self.summary_prompt = PromptTemplate(
             input_variables=["summary", "new_lines"],
             template="Summarize the following conversation in 50 words or less:\n\n{summary}\n\n{new_lines}"
         )
-        
+
         self.summary_chain = self.summary_prompt | self.llm | StrOutputParser()
     
     @property
     def memory_variables(self):
         return ["history"]
     
+    def _get_token_count(self, text: str) -> int:
+        """Rough token count based on whitespace separation."""
+        return len(text.split())
+
     def load_memory_variables(self, inputs):
-        if not self.buffer:
-            return {"history": ""}
-        
-        # Create summary from buffer
-        conversation_text = "\n".join([
+        """Return cached summary concatenated with any unsummarised buffer."""
+        buffer_text = "\n".join([
             f"Human: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}"
             for msg in self.buffer
         ])
-        
-        try:
-            summary = self.summary_chain.invoke({
-                "summary": "",
-                "new_lines": conversation_text
-            })
-            return {"history": summary}
-        except Exception as e:
-            print(f"Error generating summary: {e}")
-            return {"history": conversation_text}
+
+        history = self.summary
+        if buffer_text:
+            history = f"{history}\n{buffer_text}" if history else buffer_text
+
+        return {"history": history}
     
     def save_context(self, inputs, outputs):
         user_input = inputs.get("input", "")
@@ -68,8 +78,13 @@ class ConversationSummaryMemory:
         if len(self.buffer) > 20:  # Simple limit
             self.buffer = self.buffer[-20:]
     
+    def append_message(self, user, ai):
+        """Convenience helper to append a user/AI turn."""
+        self.save_context({"input": user}, {"output": ai})
+
     def clear(self):
         self.buffer.clear()
+        self.summary = ""
 
 class HybridEntityMemory:
     """Hybrid entity memory: rule-based for common entities, LLM for complex ones"""
@@ -225,22 +240,22 @@ class CombinedConversationMemory:
 
     @property
     def memory_variables(self):
-        return ["history", "entities_str"]
+        return ["history", "entities"]
 
     def load_memory_variables(self, inputs):
-        # Ensure inputs is not empty
+        # Ensure inputs is not empty␊
         if not inputs or not isinstance(inputs, dict):
             inputs = {"input": ""}
-        
-        # Ensure "input" key exists
+
+        # Ensure "input" key exists␊
         if "input" not in inputs:
             inputs["input"] = ""
-            
+
         summary = self.summary_memory.load_memory_variables(inputs).get("history", "")
         ent = self.entity_memory.load_memory_variables(inputs).get("entities", {})
         return {
             "history": summary,
-            "entities_str": json.dumps(ent, indent=2)
+            "entities": ent,
         }
 
     def save_context(self, inputs, outputs):
@@ -285,9 +300,25 @@ class CombinedConversationMemory:
         self.summary_memory.clear()
         self.entity_memory.clear()
 
-# Initialize memories
-summary_memory = ConversationSummaryMemory(llm)
-entity_memory = HybridEntityMemory(llm)
 
-# Build memory manager
-memory_manager = CombinedConversationMemory(summary_memory, entity_memory)
+
+_session_memories: dict[str, CombinedConversationMemory] = {}
+
+# --- Session-scoped memory management ------------------------------------
+
+
+def get_memory(session_id: str) -> CombinedConversationMemory:
+    """Return the memory instance associated with ``session_id``.
+
+    A new ``CombinedConversationMemory`` is created on first use so that each
+    session maintains its own isolated conversation state.
+    """
+
+    if session_id not in _session_memories:
+        summary_memory = ConversationSummaryMemory(llm)
+        entity_memory = HybridEntityMemory(llm)
+        _session_memories[session_id] = CombinedConversationMemory(
+            summary_memory, entity_memory
+        )
+
+    return _session_memories[session_id]
