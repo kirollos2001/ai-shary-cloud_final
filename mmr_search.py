@@ -68,8 +68,8 @@ def combined_mmr_keyword_search(
     keyword_search_fn: Callable[[str], List[Dict]],
     gemini_api_key: str,
     k: int = 10,
-    fetch_k: int = 1000,
-    lambda_param: float = 0.8,
+    fetch_k: int = 100,
+    lambda_param: float = 0.9,
     price_filter: float = None
 ) -> List[Dict]:
     """
@@ -194,7 +194,7 @@ def price_filtered_mmr_search(
     gemini_api_key: str,
     target_price: float,
     k: int = 10,
-    fetch_k: int = 1000,
+    fetch_k: int = 100,
     lambda_param: float = 0.9
 ) -> List[Dict]:
     """
@@ -220,3 +220,4 @@ def price_filtered_mmr_search(
         lambda_param=lambda_param,
         price_filter=target_price
     ) 
+
