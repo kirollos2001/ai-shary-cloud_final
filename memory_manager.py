@@ -322,3 +322,19 @@ def get_memory(session_id: str) -> CombinedConversationMemory:
         )
 
     return _session_memories[session_id]
+    # --- Backward compatibility: DO NOT REMOVE ---
+def memory_manager(session_id: str):
+    """
+    Compatibility alias so old imports keep working.
+    Returns the CombinedConversationMemory for a session.
+    """
+    # يفترض إن عندك دالة get_memory(session_id) في نفس الملف
+    return get_memory(session_id)
+
+__all__ = [
+    "ConversationSummaryMemory",
+    "HybridEntityMemory",
+    "CombinedConversationMemory",
+    "get_memory",
+    "memory_manager",  # <-- مهم
+]
