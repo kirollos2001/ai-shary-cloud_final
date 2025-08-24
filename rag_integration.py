@@ -4,7 +4,7 @@ ChromaDB RAG Integration for Real Estate Chatbot
 
 import logging
 from typing import List, Dict, Any
-from chroma_rag_setup import RealEstateRAG
+from chroma_rag_setup import get_rag_instance
 from functions import classify_query_type_with_llm
 import numpy as np
 
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class ChatbotRAGIntegration:
     def __init__(self):
         """Initialize RAG integration for chatbot"""
-        self.rag = RealEstateRAG()
+        self.rag = get_rag_instance()
         logger.info("✅ RAG integration initialized")
 
     def search_properties(self, query: str, search_type: str = "all", n_results: int = 5, use_mmr: bool = True, fetch_k: int = 20) -> Dict[str, Any]:
