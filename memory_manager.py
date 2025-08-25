@@ -1,5 +1,9 @@
 import os
-from langchain.memory import ConversationSummaryMemory, ConversationEntityMemory, CombinedMemory
+from langchain.memory import (
+    ConversationSummaryMemory,
+    ConversationEntityMemory,
+    CombinedMemory,
+)
 from langchain_google_genai import ChatGoogleGenerativeAI
 import variables
 
@@ -16,6 +20,18 @@ llm = ChatGoogleGenerativeAI(
 ) if api_key else None
 
 
+class _EntityMemory(ConversationEntityMemory):
+    """Entity memory that exposes only the ``entities`` variable."""
+
+    @property
+    def memory_variables(self) -> list[str]:
+        return ["entities"]
+
+    def load_memory_variables(self, inputs):
+        data = super().load_memory_variables(inputs)
+        return {"entities": data.get("entities", {})}
+
+
 def _build_memory() -> CombinedMemory:
     """Create a combined memory using LangChain built-ins."""
     summary = ConversationSummaryMemory(
@@ -23,8 +39,11 @@ def _build_memory() -> CombinedMemory:
         memory_key="history",
         return_messages=False,
     )
-    # Use chat_history_key instead of memory_key to avoid the clash
-    entity = ConversationEntityMemory(llm=llm, chat_history_key="entity_history")
+    # ``ConversationEntityMemory`` normally exposes both ``entities`` and a
+    # ``history`` key, which conflicts with the summary memory.  The custom
+    # ``_EntityMemory`` subclass above drops the redundant ``history`` output so
+    # the combined memory has unique variable names.
+    entity = _EntityMemory(llm=llm)
     return CombinedMemory(memories=[summary, entity])
 
 
@@ -44,4 +63,3 @@ def memory_manager(session_id: str) -> CombinedMemory:
 
 
 __all__ = ["get_memory", "memory_manager"]
-
