@@ -31,8 +31,8 @@ conversation_memory = {}
 def get_conversation_context(session_id):
     """Get conversation context for a session using LangChain memory"""
     try:
-        # Always provide a valid input key
-        memory_vars = memory_manager.load_memory_variables({"input": "context"})
+        mem = memory_manager(session_id)
+        memory_vars = mem.load_memory_variables({})
         
         # Get legacy context for backward compatibility
         if session_id not in conversation_memory:
@@ -66,27 +66,22 @@ def get_conversation_context(session_id):
 def update_conversation_context(session_id, key, value):
     """Update conversation context using LangChain memory"""
     try:
-        if key == "current_search_results":
-            memory_manager.update_search_results(session_id, value)
-        else:
-            # Fallback to legacy memory
-            if session_id not in conversation_memory:
-                conversation_memory[session_id] = {
-                    "user_preferences": {},
-                    "previous_messages": [],
-                    "current_search_results": [],
-                    "user_info": {}
-                }
-            conversation_memory[session_id][key] = value
-    except Exception as e:
-        logging.error(f"Error updating conversation context: {e}")
-        # Fallback to legacy memory only
         if session_id not in conversation_memory:
             conversation_memory[session_id] = {
                 "user_preferences": {},
                 "previous_messages": [],
                 "current_search_results": [],
-                "user_info": {}
+                "user_info": {},
+            }
+        conversation_memory[session_id][key] = value
+    except Exception as e:
+        logging.error(f"Error updating conversation context: {e}")
+        if session_id not in conversation_memory:
+            conversation_memory[session_id] = {
+                "user_preferences": {},
+                "previous_messages": [],
+                "current_search_results": [],
+                "user_info": {},
             }
         conversation_memory[session_id][key] = value
 
@@ -140,9 +135,10 @@ def extract_user_preferences_from_message(user_message):
 async def process_gemini_response_async(model, user_message, session_id=None):
     """Process Gemini response and handle automatic function calls with LangChain memory"""
     try:
+        mem = memory_manager(session_id)
         # Save user message to LangChain memory with proper error handling
         try:
-            memory_manager.save_context({"input": user_message}, {"output": ""})
+            mem.save_context({"input": user_message}, {"output": ""})
         except Exception as e:
             logging.warning(f"Failed to save to memory manager: {e}")
         
@@ -287,7 +283,7 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         
         # Save AI response to LangChain memory with proper error handling
         try:
-            memory_manager.save_context({"input": user_message}, {"output": response_text})
+            mem.save_context({"input": user_message}, {"output": response_text})
         except Exception as e:
             logging.warning(f"Failed to save AI response to memory manager: {e}")
         
@@ -314,4 +310,3 @@ def get_resource_files():
             if os.path.isfile(file_path):
                 file_paths.append(file_path)
     return file_paths
-
