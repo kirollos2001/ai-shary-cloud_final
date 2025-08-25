@@ -23,13 +23,8 @@ def _build_memory() -> CombinedMemory:
         memory_key="history",
         return_messages=False,
     )
-    # ConversationEntityMemory also returns a ``history`` key by default which
-    # clashes with the summary memory above when combined.  Using a distinct
-    # ``memory_key`` ensures that each memory exposes unique variables so
-    # ``CombinedMemory`` can validate them correctly.  We only consume the
-    # ``entities`` output in the rest of the codebase, so the extra
-    # ``entity_history`` key can safely be ignored by callers.
-    entity = ConversationEntityMemory(llm=llm, memory_key="entity_history")
+    # Use chat_history_key instead of memory_key to avoid the clash
+    entity = ConversationEntityMemory(llm=llm, chat_history_key="entity_history")
     return CombinedMemory(memories=[summary, entity])
 
 
@@ -49,3 +44,4 @@ def memory_manager(session_id: str) -> CombinedMemory:
 
 
 __all__ = ["get_memory", "memory_manager"]
+
