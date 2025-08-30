@@ -4,12 +4,11 @@ import logging
 import time
 import tempfile
 from filelock import FileLock
-
+from pathlib import Path
 from config import get_db_connection
 
-CACHE_DIR = "cache"
-if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
+CACHE_DIR = os.environ.get("CACHE_DIR", "cache")
+Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
 def save_to_cache(filename, data):
     path = os.path.join(CACHE_DIR, filename)
@@ -309,4 +308,5 @@ def sync_conversations_to_db():
 
     save_to_cache("conversations_updates.json", [])
     logging.info(f"✅ Synced {len(convos)} conversations to DB and cleared conversations_updates.json")
+
 
