@@ -10,10 +10,10 @@ import variables
 def create_gemini_model():
     """Create and configure Gemini model with instructions and tools"""
     try:
-        # Configure Gemini with API key
-        api_key = os.environ.get('GEMINI_API_KEY')
+        # Configure Gemini with API key from variables.py
+        api_key = getattr(variables, "GEMINI_API_KEY", None)
         if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable is not set")
+            raise ValueError("GEMINI_API_KEY is not set in variables.py")
         
         genai.configure(api_key=api_key)
         
