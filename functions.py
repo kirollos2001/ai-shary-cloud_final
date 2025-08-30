@@ -601,7 +601,7 @@ def property_search(arguments):
     """
     import time
     start_time = time.time()
-    max_execution_time = 8.0  # 8 seconds timeout
+    max_execution_time = 15.0  # 15 seconds timeout (increased from 8)
     
     try:
         # Mandatory fields
@@ -1005,15 +1005,21 @@ def property_search(arguments):
             }
         except Exception as e:
             print(f"🚨 Error in ChromaDB search: {e}")
+            import traceback
+            print(f"🚨 Full traceback: {traceback.format_exc()}")
             return {
                 "source": "error",
-                "message": "❌ خطأ في البحث - يرجى المحاولة مرة أخرى لاحقاً.",
+                "message": f"❌ خطأ في البحث: {str(e)} - يرجى المحاولة مرة أخرى لاحقاً.",
                 "results": []
             }
 
     except Exception as e:
         print(f"🚨 Error in property_search: {e}")
-        return {"error": str(e)}
+        return {
+            "source": "error",
+            "message": f"❌ خطأ في البحث: {str(e)} - يرجى المحاولة مرة أخرى لاحقاً.",
+            "results": []
+        }
 
 
 def serialize_mysql_result(results):
@@ -1792,11 +1798,17 @@ def insight_search(arguments):
             "error": f"❌ حصل خطأ أثناء معالجة الاستفسار: {str(e)}"
         }
 
-def extract_client_preferences_llm(user_message, conversation_history, current_preferences, conversation_path):
+def extract_client_preferences_llm(user_message, conversation_history=None, current_preferences=None, conversation_path=None):
     """
     Enhanced client preferences extraction with real-time client info tracking
     """
     try:
+        # Provide safe defaults when not supplied
+        if conversation_history is None:
+            conversation_history = []
+        if current_preferences is None:
+            current_preferences = {}
+        
         # Extract client info from current message
         current_client_info = extract_client_info_from_message(user_message)
         
@@ -2997,3 +3009,6 @@ def advanced_conversation_summary_from_db(client_id, conversation_id, name="Unkn
     except Exception as e:
         print(f"🚨 Error generating summary: {e}")
         return f"❌ حصل خطأ أثناء تلخيص المحادثة: {e}"
+
+
+
