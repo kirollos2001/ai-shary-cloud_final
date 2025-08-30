@@ -6,6 +6,7 @@ import logging
 import os
 from typing import List, Dict, Any
 from gemini_chroma_setup import RealEstateRAGWithGemini
+import variables
 
 logger = logging.getLogger(__name__)
 
@@ -15,13 +16,13 @@ class ChatbotRAGIntegrationWithGemini:
         Initialize RAG integration with Gemini embeddings
         
         Args:
-            gemini_api_key: Google Gemini API key (optional, will use env var if not provided)
+            gemini_api_key: Google Gemini API key (optional, will use variables.py if not provided)
         """
         if not gemini_api_key:
-            gemini_api_key = os.getenv('GEMINI_API_KEY')
+            gemini_api_key = getattr(variables, "GEMINI_API_KEY", None)
         
         if not gemini_api_key:
-            raise ValueError("Gemini API key is required. Set GEMINI_API_KEY environment variable or pass it as parameter.")
+            raise ValueError("Gemini API key is required. Set it in variables.py or pass it as parameter.")
         
         self.rag = RealEstateRAGWithGemini(gemini_api_key)
         logger.info("✅ RAG integration with Gemini embeddings initialized")
