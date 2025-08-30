@@ -2,16 +2,17 @@ import chromadb
 import json
 import os
 import logging
+import shutil
+import time
+import sqlite3
 import google.generativeai as genai
 import numpy as np
 import variables
 from typing import List, Dict, Any
 from chromadb.config import Settings
-
 # Configure Gemini API
 os.environ["GEMINI_API_KEY"] = variables.GEMINI_API_KEY
 genai.configure(api_key=variables.GEMINI_API_KEY)
-
 class GeminiEmbeddingFunction:
     """Custom embedding function using Gemini embeddings"""
     
@@ -20,7 +21,6 @@ class GeminiEmbeddingFunction:
     
     def name(self) -> str:
         return "gemini-embedding-001"
-
     def __call__(self, input: list) -> list:
         try:
             result = genai.embed_content(
@@ -72,103 +72,140 @@ class GeminiEmbeddingFunction:
             all_embeddings.extend(batch_embeddings)
             
         return all_embeddings
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 # Singleton cache for RAG instance
 _rag_instance = None
-
-
 class RealEstateRAG:
     def __init__(self, persist_directory: str = "./chroma_db"):
         self.persist_directory = persist_directory
         chroma_settings = Settings(anonymized_telemetry=False, allow_reset=True)
         self.client = chromadb.PersistentClient(path=persist_directory, settings=chroma_settings)
         self.embedder = GeminiEmbeddingFunction(variables.GEMINI_API_KEY)
-
+        # Initialize collections with schema-mismatch recovery
+        try:
+            self._create_or_get_collections()
+        except Exception as e:
+            err_msg = str(e)
+            logger.error(f"Error creating collections: {err_msg}")
+            if isinstance(e, sqlite3.OperationalError) or "no such column: collections.topic" in err_msg:
+                logger.warning("Detected ChromaDB schema mismatch. Attempting automatic reset...")
+                self._reset_chroma_storage(chroma_settings)
+                self._create_or_get_collections()
+            else:
+                raise
+        logger.info("ChromaDB initialized with collections")
+        return
         self.units_collection = self.client.get_or_create_collection(
             name="real_estate_units",
             metadata={"description": "Real estate units data for RAG"},
             embedding_function=self.embedder
         )
-
         self.new_launches_collection = self.client.get_or_create_collection(
             name="new_launches",
             metadata={"description": "New property launches data for RAG"},
             embedding_function=self.embedder
         )
-
         logger.info("✅ ChromaDB initialized with collections")
-
     def reset_collections(self):
         """Reset collections to start fresh with correct dimensions"""
         try:
             # Delete existing collections
             try:
                 self.client.delete_collection("real_estate_units")
-                logger.info("🗑️ Deleted existing real_estate_units collection")
+                logger.info("Deleted existing real_estate_units collection")
             except Exception:
-                logger.info("📋 real_estate_units collection doesn't exist, creating new one")
-            
+                logger.info("real_estate_units collection doesn't exist, creating new one")
+    
             try:
                 self.client.delete_collection("new_launches")
-                logger.info("🗑️ Deleted existing new_launches collection")
+                logger.info("Deleted existing new_launches collection")
             except Exception:
-                logger.info("📋 new_launches collection doesn't exist, creating new one")
-            
+                logger.info("new_launches collection doesn't exist, creating new one")
+    
             # Create fresh collections with correct embedding dimensions
             self.units_collection = self.client.create_collection(
                 name="real_estate_units",
                 metadata={"description": "Real estate units data for RAG with 3072-dim embeddings"},
                 embedding_function=self.embedder
             )
-
+    
             self.new_launches_collection = self.client.create_collection(
                 name="new_launches",
                 metadata={"description": "New property launches data for RAG with 3072-dim embeddings"},
                 embedding_function=self.embedder
             )
-            
-            logger.info("✅ Fresh collections created with 3072-dimensional embeddings")
-            
+    
+            logger.info("Fresh collections created with 3072-dimensional embeddings")
+    
         except Exception as e:
-            logger.error(f"❌ Error resetting collections: {e}")
-
+            logger.error(f"Error resetting collections: {e}")
+    
+    def _create_or_get_collections(self):
+        """Create or get required collections."""
+        self.units_collection = self.client.get_or_create_collection(
+            name="real_estate_units",
+            metadata={"description": "Real estate units data for RAG"},
+            embedding_function=self.embedder
+        )
+    
+        self.new_launches_collection = self.client.get_or_create_collection(
+            name="new_launches",
+            metadata={"description": "New property launches data for RAG"},
+            embedding_function=self.embedder
+        )
+    
+    def _reset_chroma_storage(self, chroma_settings: Settings):
+        """Reset persistent storage to recover from schema mismatches.
+    
+        1) Try client.reset() if allowed.
+        2) Backup existing directory and recreate a fresh one.
+        """
+        # Try logical reset first
+        try:
+            if hasattr(self.client, "reset"):
+                self.client.reset()
+        except Exception:
+            pass
+    
+        # Backup existing directory and recreate
+        try:
+            if os.path.isdir(self.persist_directory):
+                backup_dir = f"{self.persist_directory}_backup_{int(time.time())}"
+                shutil.move(self.persist_directory, backup_dir)
+        except Exception:
+            pass
+    
+        os.makedirs(self.persist_directory, exist_ok=True)
+        self.client = chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+    
     def load_cache_data(self) -> tuple:
         try:
             units_path = os.path.join("cache", "units.json")
             new_launches_path = os.path.join("cache", "new_launches.json")
-
             units_data = []
             new_launches_data = []
-
             if os.path.exists(units_path):
                 with open(units_path, 'r', encoding='utf-8') as f:
                     units_data = json.load(f)
                 logger.info(f"✅ Loaded {len(units_data)} units from cache")
             else:
                 logger.warning("⚠️ units.json not found in cache directory")
-
             if os.path.exists(new_launches_path):
                 with open(new_launches_path, 'r', encoding='utf-8') as f:
                     new_launches_data = json.load(f)
                 logger.info(f"✅ Loaded {len(new_launches_data)} new launches from cache")
             else:
                 logger.warning("⚠️ new_launches.json not found in cache directory")
-
             return units_data, new_launches_data
-
         except Exception as e:
             logger.error(f"❌ Error loading cache data: {e}")
             return [], []
-
     def prepare_units_documents(self, units_data: List[Dict]) -> tuple:
         documents = []
         metadatas = []
         ids = []
-
         for unit in units_data:
             name_en = unit.get('name_en', '')
             name_ar = unit.get('name_ar', '')
@@ -184,26 +221,20 @@ class RealEstateRAG:
             installment_years = unit.get('installment_years', '')
             sale_type = unit.get('sale_type', '')
             address = unit.get('address', '')
-
             # Remove the fields from embedding text and move them to metadata
             text_for_embedding = f"""
 Unit_description_ar: الوحدات دي ممكن تكون تحت الإنشاء او محتاجة تشطيب، او جاهزة دلوقتي للاستلام والسكن، وممكن تقدر تروح تعاينها بنفسك قبل ما تشتري
 Unit_description_en: These units may are  under construction and may require  finishing — they are ready now for handover and immediate move-in. You can also visit and inspect them yourself before buying.
-
 Name (EN): {name_en}
 Name (AR): {name_ar}
-
 Description (EN): {desc_en}
 Description (AR): {desc_ar}
-
 Located in:
 Compound (EN): {compound_name_en}
 Compound (AR): {compound_name_ar}
-
 Sale type: {sale_type}
 Address: {address}
 """.strip()
-
             # Convert price to float for filtering
             price_value = 0.0
             try:
@@ -212,7 +243,6 @@ Address: {address}
                     price_value = float(price_str)
             except (ValueError, TypeError):
                 price_value = 0.0
-
             metadata = {
                 "new_image": str(unit.get('new_image', '')),
                 "image": str(unit.get('new_image', '')),  # Backward compatibility
@@ -224,18 +254,14 @@ Address: {address}
                 "installment_years": str(unit.get('installment_years', '')),
                 "delivery_in": str(unit.get('delivery_in', '')),
             }
-
             documents.append(text_for_embedding)
             metadatas.append(metadata)
             ids.append(f"unit_{unit.get('id', 'unknown')}")
-
         return documents, metadatas, ids
-
     def prepare_new_launches_documents(self, new_launches_data: List[Dict]) -> tuple:
         documents = []
         metadatas = []
         ids = []
-
         for launch in new_launches_data:
             desc_en = launch.get('desc_en', '')
             desc_ar = launch.get('desc_ar', '')
@@ -244,89 +270,68 @@ Address: {address}
             developer_name = launch.get('developer_name', '')
             property_type_name = launch.get('property_type_name', '')
             city_name = launch.get('city_name', '')
-
             text_for_embedding = f"""
 New_Launch_Description_ar: الوحدات الـ New Launch هي وحدات لسه المُطور معلِن عنها لأول مرة، ولسه في مرحلة الحجز الأولي قبل ما يبدأ التنفيذ والبناء. الميزة الأساسية إنك بتحجز بدري بسعر أقل، بتختار أحسن موقع داخل الكمبوند، وبتستفيد من تسهيلات في الدفع، حتى لو السعر النهائي لسه مش معلن.
 New_Launch_Description_en: New Launch units are newly announced properties offered at early reservation stages, allowing buyers to reserve at lower prices, choose prime locations within the compound, and benefit from flexible payment plans.
-
 Name (EN): {desc_en}
 Name (AR): {desc_ar}
-
 Description (EN): {desc_en}
 Description (AR): {desc_ar}
-
 Located in:
 Compound (EN): {compound_name_en}
 Compound (AR): {compound_name_ar}
-
 Developer: {developer_name}
 Property Type: {property_type_name}
 City: {city_name}
-
 Area: Coming Soon
 Price: Coming Soon
-
 Bedrooms: Coming Soon
 Bathrooms: Coming Soon
-
 Delivery in: Coming Soon
 Installments over: Coming Soon
-
 Sale type: New Launch
 Address: {city_name}
 """.strip()
-
             metadata = {
                 "new_image": str(launch.get('new_image', '')),
                 "launch_id": str(launch.get('id', '')),
             }
-
             documents.append(text_for_embedding)
             metadatas.append(metadata)
             ids.append(f"launch_{launch.get('id', 'unknown')}")
-
         return documents, metadatas, ids
-
     def store_units_in_chroma(self, units_data: List[Dict]):
         if not units_data:
             logger.warning("⚠️ No units data to store")
             return
-
         documents, metadatas, ids = self.prepare_units_documents(units_data)
-
         # Clean metadata to keep only necessary fields
         metadatas = [
             {k: v for k, v in m.items() if k in ['new_image', 'unit_id', 'price_value', 'bedrooms', 'bathrooms', 'apartment_area', 'installment_years', 'delivery_in']}
             for m in metadatas
         ]
-
         try:
             # Add documents without manually deleting (let ChromaDB handle duplicates)
             self.units_collection.add(documents=documents, metadatas=metadatas, ids=ids)
             logger.info(f"✅ Successfully stored {len(units_data)} units in ChromaDB")
         except Exception as e:
             logger.error(f"❌ Error storing units in ChromaDB: {e}")
-
     def store_new_launches_in_chroma(self, new_launches_data: List[Dict]):
         if not new_launches_data:
             logger.warning("⚠️ No new launches data to store")
             return
-
         documents, metadatas, ids = self.prepare_new_launches_documents(new_launches_data)
-
         # Clean metadata to keep only necessary fields
         metadatas = [
             {k: v for k, v in m.items() if k in ['new_image', 'launch_id', 'id', 'name', 'property_type_name', 'city_name']}
             for m in metadatas
         ]
-
         try:
             # Add documents without manually deleting (let ChromaDB handle duplicates)
             self.new_launches_collection.add(documents=documents, metadatas=metadatas, ids=ids)
             logger.info(f"✅ Successfully stored {len(new_launches_data)} new launches in ChromaDB")
         except Exception as e:
             logger.error(f"❌ Error storing new launches in ChromaDB: {e}")
-
     def get_collection_stats(self) -> Dict[str, int]:
         """Get statistics about the collections"""
         try:
@@ -340,7 +345,6 @@ Address: {city_name}
         except Exception as e:
             logger.error(f"❌ Error getting collection stats: {e}")
             return {'units_count': 0, 'new_launches_count': 0, 'total_count': 0}
-
     def reset_collections(self):
         """Reset collections to ensure correct dimensions"""
         try:
@@ -364,7 +368,6 @@ Address: {city_name}
             logger.info("✅ Collections reset successfully")
         except Exception as e:
             logger.error(f"❌ Error resetting collections: {e}")
-
     def process_query_with_mmr(self, query: str, n_results: int = 10, filters: Dict = None) -> List[Dict]:
         """Process query using MMR for optimal diversity and relevance"""
         try:
@@ -436,7 +439,6 @@ Address: {city_name}
         except Exception as e:
             logger.error(f"❌ Error in process_query_with_mmr: {e}")
             return []
-
     def search_units(self, query: str, n_results: int = 10, filters: Dict = None) -> List[Dict]:
         """Search units collection using MMR-optimized RAG pipeline"""
         try:
@@ -450,7 +452,6 @@ Address: {city_name}
                     where_clauses.append({'price_value': {'$lte': filters['price_max']}})
                 # Skip bedrooms/bathrooms for now as requested
                 pass  # No filters applied at ChromaDB level for now
-
             # 1. Get candidates for MMR processing (RAG pipeline) - reduced for performance
             fetch_k = 100  # Reduced from 1000 to 100 for better performance
             
@@ -546,7 +547,6 @@ Address: {city_name}
         except Exception as e:
             logger.error(f"❌ Error searching units: {e}")
             return []
-
     def _format_direct_results(self, results: Dict, n_results: int) -> List[Dict]:
         """Helper method to format results when MMR is not available"""
         formatted_results = []
@@ -566,7 +566,6 @@ Address: {city_name}
                     'distance': distance
                 })
         return formatted_results
-
     def _apply_numeric_reranking(self, results: List[Dict], filters: Dict = None) -> List[Dict]:
         """Apply numeric re-ranking with strict price filtering and bonus for near targets"""
         if not filters:
@@ -608,7 +607,6 @@ Address: {city_name}
                         if token and token in doc_text:
                             score += 0.2
                             break
-
             # Property type bonus
             query_property_type = filters.get('query_property_type')
             if query_property_type:
@@ -627,7 +625,6 @@ Address: {city_name}
                     variants = {ptype}
                 if any(v in doc_text for v in variants):
                     score += 0.5
-
             # Bedroom matching bonus
             if 'bedrooms' in filters and filters['bedrooms'] > 0:
                 bedrooms = metadata.get('bedrooms', 0)
@@ -658,7 +655,6 @@ Address: {city_name}
         # Sort by score (descending) and return items
         scored_results.sort(key=lambda x: x[0], reverse=True)
         return [item for score, item in scored_results]
-
     def _deduplicate_results(self, results: List[Dict]) -> List[Dict]:
         """Remove duplicates based on ID"""
         seen_ids = set()
@@ -679,7 +675,6 @@ Address: {city_name}
                     unique_results.append(item)
         
         return unique_results
-
     def search_new_launches(self, query: str, n_results: int = 10, filters: Dict = None) -> List[Dict]:
         """Search new launches collection using MMR-optimized RAG pipeline"""
         try:
@@ -697,7 +692,6 @@ Address: {city_name}
                 if 'location' in filters and filters['location']:
                     # Note: Location filtering would need to be done post-search since it's in the document text
                     pass
-
             # 1. Get candidates for MMR processing (RAG pipeline) - reduced for performance
             fetch_k = 100  # Reduced from 1000 to 100 for better performance
             
@@ -784,7 +778,6 @@ Address: {city_name}
         except Exception as e:
             logger.error(f"❌ Error searching new launches: {e}")
             return []
-
     def search_all(self, query: str, n_results: int = 20) -> Dict[str, List[Dict]]:
         """Search both collections using MMR-optimized RAG pipeline"""
         try:
@@ -812,22 +805,17 @@ def get_rag_instance() -> 'RealEstateRAG':
     if _rag_instance is None:
         _rag_instance = RealEstateRAG()
     return _rag_instance           
-
 def main():
     logger.info("🚀 Starting ChromaDB RAG setup for real estate data...")
-
     rag = RealEstateRAG()
     
     # Reset collections to ensure correct dimensions
     rag.reset_collections()
     
     units_data, new_launches_data = rag.load_cache_data()
-
     rag.store_units_in_chroma(units_data)
     rag.store_new_launches_in_chroma(new_launches_data)
-
     stats = rag.get_collection_stats()
     logger.info(f"📊 ChromaDB Statistics: {stats}")
-
 if __name__ == "__main__":
     main()
