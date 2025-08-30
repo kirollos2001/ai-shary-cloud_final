@@ -12,9 +12,9 @@ from memory_manager import memory_manager
 def check_gemini_setup():
     """Check if Gemini API is properly configured"""
     try:
-        api_key = os.environ.get('GEMINI_API_KEY')
+        api_key = getattr(variables, "GEMINI_API_KEY", None)
         if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable is not set")
+            raise ValueError("GEMINI_API_KEY is not set in variables.py")
         
         genai.configure(api_key=api_key)
         logging.info("✅ Gemini API is properly configured.")
@@ -31,8 +31,8 @@ conversation_memory = {}
 def get_conversation_context(session_id):
     """Get conversation context for a session using LangChain memory"""
     try:
-        mem = memory_manager(session_id)
-        memory_vars = mem.load_memory_variables({})
+        # Always provide a valid input key
+        memory_vars = memory_manager.load_memory_variables({"input": "context", "session_id": session_id})
         
         # Get legacy context for backward compatibility
         if session_id not in conversation_memory:
@@ -66,22 +66,27 @@ def get_conversation_context(session_id):
 def update_conversation_context(session_id, key, value):
     """Update conversation context using LangChain memory"""
     try:
-        if session_id not in conversation_memory:
-            conversation_memory[session_id] = {
-                "user_preferences": {},
-                "previous_messages": [],
-                "current_search_results": [],
-                "user_info": {},
-            }
-        conversation_memory[session_id][key] = value
+        if key == "current_search_results":
+            memory_manager.update_search_results(session_id, value)
+        else:
+            # Fallback to legacy memory
+            if session_id not in conversation_memory:
+                conversation_memory[session_id] = {
+                    "user_preferences": {},
+                    "previous_messages": [],
+                    "current_search_results": [],
+                    "user_info": {}
+                }
+            conversation_memory[session_id][key] = value
     except Exception as e:
         logging.error(f"Error updating conversation context: {e}")
+        # Fallback to legacy memory only
         if session_id not in conversation_memory:
             conversation_memory[session_id] = {
                 "user_preferences": {},
                 "previous_messages": [],
                 "current_search_results": [],
-                "user_info": {},
+                "user_info": {}
             }
         conversation_memory[session_id][key] = value
 
@@ -135,26 +140,14 @@ def extract_user_preferences_from_message(user_message):
 async def process_gemini_response_async(model, user_message, session_id=None):
     """Process Gemini response and handle automatic function calls with LangChain memory"""
     try:
-        mem = memory_manager(session_id)
-        # Save user message to LangChain memory with proper error handling
-        try:
-            mem.save_context({"input": user_message}, {"output": ""})
-        except Exception as e:
-            logging.warning(f"Failed to save to memory manager: {e}")
+        # Defer memory save until we have both input and output (paired)
         
         # Get conversation context using LangChain memory
         context = get_conversation_context(session_id)
-
+        
         # Extract new preferences from current message
         new_preferences = extract_user_preferences_from_message(user_message)
-
-        if new_preferences:
-            merged_preferences = {
-                **context.get("preferences", {}),
-                **{k: v for k, v in new_preferences.items() if v}
-            }
-            update_conversation_context(session_id, "preferences", merged_preferences)
-
+        
         # Get updated context after preference update
         context = get_conversation_context(session_id)
         
@@ -183,7 +176,7 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         
         # Generate response from Gemini with automatic function calling
         logging.info(f"Generating response for user message: {user_message[:100]}...")
-        response = await asyncio.to_thread(model.generate_content, full_prompt)
+        response = model.generate_content(full_prompt)
         
         # Check if response contains function calls
         if hasattr(response, 'candidates') and response.candidates:
@@ -281,9 +274,12 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         response_text = response.text if response.text else "❌ لم يتم استلام رد من المساعد."
         logging.info(f"Gemini text response: {response_text[:200]}...")
         
-        # Save AI response to LangChain memory with proper error handling
+        # Save user input and AI output together into session-scoped memory
         try:
-            mem.save_context({"input": user_message}, {"output": response_text})
+            memory_manager.save_context(
+                {"input": user_message, "session_id": session_id},
+                {"output": response_text}
+            )
         except Exception as e:
             logging.warning(f"Failed to save AI response to memory manager: {e}")
         
@@ -310,3 +306,4 @@ def get_resource_files():
             if os.path.isfile(file_path):
                 file_paths.append(file_path)
     return file_paths
+
