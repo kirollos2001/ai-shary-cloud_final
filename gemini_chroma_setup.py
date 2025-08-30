@@ -10,7 +10,33 @@ import time
 import os
 import variables
 
-os.environ["GEMINI_API_KEY"] = variables.GEMINI_API_KEY
+# 1) امنع استخدام كوتا مشروع GCP (ADC/Quota Project)
+for k in (
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_PROJECT",
+    "GCLOUD_PROJECT",
+    "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "GOOGLE_PROJECT_ID",
+):
+    os.environ.pop(k, None)
+
+# 2) هات الـ API Key من variables.py فقط
+GOOGLE_API_KEY = getattr(variables, "GEMINI_API_KEY", None)
+
+if not GOOGLE_API_KEY:
+    raise ValueError("GEMINI_API_KEY is not set in variables.py")
+
+# 3) عرّف الموديل باستخدام الـ API Key فقط
+genai.configure(api_key=GOOGLE_API_KEY)
+
+# (اختياري) Debug بسيط علشان تتأكد إنه شغّال بمفتاح API مش بمشروع GCP
+print("Using API key only? ->", bool(GOOGLE_API_KEY) and not any(
+    os.getenv(v) for v in [
+        "GOOGLE_APPLICATION_CREDENTIALS","GOOGLE_CLOUD_PROJECT",
+        "GCLOUD_PROJECT","GOOGLE_CLOUD_QUOTA_PROJECT","GOOGLE_PROJECT_ID"
+    ]
+))
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -381,10 +407,10 @@ def main():
     """Main function to set up ChromaDB with Gemini embeddings"""
     logger.info("🚀 Starting ChromaDB RAG setup with Gemini embeddings...")
     
-    # Get Gemini API key from environment or config
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    # Get Gemini API key from variables.py
+    gemini_api_key = getattr(variables, "GEMINI_API_KEY", None)
     if not gemini_api_key:
-        logger.error("❌ GEMINI_API_KEY environment variable not set")
+        logger.error("❌ GEMINI_API_KEY is not set in variables.py")
         return
     
     # Initialize RAG system with Gemini embeddings
