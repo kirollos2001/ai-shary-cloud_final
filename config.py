@@ -79,13 +79,30 @@ def get_db_connection():
 def configure_gemini():
     """Configure Gemini API with the API key from environment variables."""
     try:
-        api_key = os.environ.get('GEMINI_API_KEY')
-        if not api_key:
-            logging.error("❌ GEMINI_API_KEY environment variable is not set")
-            return None
+        # 1) امنع استخدام كوتا مشروع GCP (ADC/Quota Project)
+        for k in (
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_PROJECT",
+            "GCLOUD_PROJECT",
+            "GOOGLE_CLOUD_QUOTA_PROJECT",
+            "GOOGLE_PROJECT_ID",
+        ):
+            os.environ.pop(k, None)
+
+        # 2) هات الـ API Key من variables.py فقط
+        GOOGLE_API_KEY = getattr(variables, "GEMINI_API_KEY", None)
         
-        genai.configure(api_key=api_key)
-        logging.info("✅ Gemini API configured successfully")
+        if not GOOGLE_API_KEY:
+            logging.error("❌ GEMINI_API_KEY is not set in variables.py")
+            raise ValueError("GEMINI_API_KEY is not set in variables.py")
+        
+        # 3) عرّف الموديل باستخدام الـ API Key فقط
+        genai.configure(api_key=GOOGLE_API_KEY)
+        
+        # (اختياري) Debug بسيط علشان تتأكد إنه شغّال بمفتاح API مش بمشروع GCP
+        logging.info(f"Using API key only? -> {bool(GOOGLE_API_KEY) and not any(os.getenv(v) for v in ['GOOGLE_APPLICATION_CREDENTIALS','GOOGLE_CLOUD_PROJECT','GCLOUD_PROJECT','GOOGLE_CLOUD_QUOTA_PROJECT','GOOGLE_PROJECT_ID'])}")
+        
+        logging.info("✅ Gemini API configured successfully with API key only")
         return genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
     except Exception as e:
         logging.error(f"❌ Error configuring Gemini API: {e}")
