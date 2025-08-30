@@ -7,8 +7,8 @@ GEMINI_MODEL_NAME = "gemini-2.5-flash"
 # Database Configuration
 DB_HOST = os.environ.get("DB_HOST", "77.37.35.26")
 DB_PORT = int(os.environ.get("DB_PORT", 3306))
-DB_NAME = os.environ.get("DB_NAME", "u166985034_shary_test_db")
-DB_USER = os.environ.get("DB_USER", "u166985034_test")
+DB_NAME = os.environ.get("DB_NAME")
+DB_USER = os.environ.get("DB_USER")
 DB_PASSWORD = os.environ.get("DB_PASSWORD")
 
 # Email Configuration
@@ -16,7 +16,7 @@ EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
 EMAIL_PORT = int(os.environ.get("EMAIL_PORT", 587))
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
-TEAM_EMAIL = os.environ.get("TEAM_EMAIL", "kirolloseisa2@gmail.com")
+TEAM_EMAIL = os.environ.get("TEAM_EMAIL")
 
 # API Configuration
 USER_INFO_API_URL = os.environ.get("USER_INFO_API_URL", "https://shary.eg/api/UserInfo")
@@ -43,4 +43,3 @@ SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", 3600))  # 1 hour in seco
 
 # Logging Configuration
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
-
