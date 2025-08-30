@@ -220,4 +220,3 @@ def price_filtered_mmr_search(
         lambda_param=lambda_param,
         price_filter=target_price
     ) 
-
