@@ -87,7 +87,8 @@ def configure_gemini():
             "GOOGLE_CLOUD_QUOTA_PROJECT",
             "GOOGLE_PROJECT_ID",
         ):
-            os.environ.pop(k, None)
+            # Do not clear cloud-provided credentials in production
+            pass
 
         # 2) هات الـ API Key من variables.py فقط
         GOOGLE_API_KEY = getattr(variables, "GEMINI_API_KEY", None)
