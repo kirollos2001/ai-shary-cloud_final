@@ -76,7 +76,7 @@ chromadb_initialized = False
 # -------------------------------------------------------
 # Gemini API Key
 # -------------------------------------------------------
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GEMINI_API_KEY = getattr(variables, 'GEMINI_API_KEY', None)
 if not GEMINI_API_KEY:
     logging.warning("⚠️ GEMINI_API_KEY environment variable is not set")
     raise ValueError("Gemini API key is not configured. Please set GEMINI_API_KEY environment variable")
