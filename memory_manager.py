@@ -1,9 +1,11 @@
 import os
 import uuid  # Added for default session_id
-from typing import Dict
+import json
+from typing import Dict, Optional, List, Tuple
 from langchain.memory import ConversationSummaryMemory, ConversationEntityMemory, CombinedMemory
 from langchain_google_genai import ChatGoogleGenerativeAI
 import variables
+from redis_utils import get_redis
 
 # 1) امنع استخدام كوتا مشروع GCP (ADC/Quota Project)
 for k in (
@@ -66,13 +68,93 @@ def _build_memory() -> CombinedMemory:
 
 _session_memories: Dict[str, CombinedMemory] = {}
 
+# --- Redis-backed persistence (optional) ---
+_HISTORY_KEY = "mem:{sid}:history"
+_SUMMARY_KEY = "mem:{sid}:summary"
+_ENTITIES_KEY = "mem:{sid}:entities"
+
+
+def _redis_keys(session_id: str) -> Tuple[str, str, str]:
+    return (
+        _HISTORY_KEY.format(sid=session_id),
+        _SUMMARY_KEY.format(sid=session_id),
+        _ENTITIES_KEY.format(sid=session_id),
+    )
+
+
+def _load_snapshot_from_redis(session_id: str) -> Tuple[Optional[str], Optional[dict], List[Tuple[str, str]]]:
+    r = get_redis()
+    if not r:
+        return None, None, []
+    h_key, s_key, e_key = _redis_keys(session_id)
+    try:
+        pipe = r.pipeline()
+        pipe.get(s_key)
+        pipe.get(e_key)
+        pipe.lrange(h_key, 0, -1)
+        s_val, e_val, hist = pipe.execute()
+        summary = s_val.decode("utf-8") if s_val else None
+        entities = json.loads(e_val) if e_val else None
+        history: List[Tuple[str, str]] = []
+        for item in hist or []:
+            try:
+                pair = json.loads(item)
+                history.append((pair.get("input", ""), pair.get("output", "")))
+            except Exception:
+                continue
+        return summary, entities, history
+    except Exception:
+        return None, None, []
+
+
+def _persist_to_redis(session_id: str, input_text: str, output_text: str, summary: Optional[str], entities: Optional[dict]) -> None:
+    r = get_redis()
+    if not r:
+        return
+    h_key, s_key, e_key = _redis_keys(session_id)
+    try:
+        pipe = r.pipeline()
+        # append history
+        pipe.rpush(h_key, json.dumps({"input": input_text, "output": output_text}))
+        # update snapshot
+        if summary is not None:
+            pipe.set(s_key, summary)
+        if entities is not None:
+            pipe.set(e_key, json.dumps(entities, ensure_ascii=False))
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def _clear_redis(session_id: Optional[str] = None) -> None:
+    r = get_redis()
+    if not r:
+        return
+    try:
+        if session_id is None:
+            # no mass delete to avoid impacting other instances
+            return
+        h_key, s_key, e_key = _redis_keys(session_id)
+        r.delete(h_key, s_key, e_key)
+    except Exception:
+        pass
+
 
 def get_memory(session_id: str) -> CombinedMemory:
     """Return the memory instance for the given session id."""
     if session_id is None:
         session_id = str(uuid.uuid4())  # Generate a default if None
     if session_id not in _session_memories:
-        _session_memories[session_id] = _build_memory()
+        mem = _build_memory()
+        # Seed from Redis snapshot by replaying history if present
+        _summary, _entities, history = _load_snapshot_from_redis(session_id)
+        if history:
+            for inp, out in history[-20:]:
+                try:
+                    mem.save_context({"input": inp}, {"output": out})
+                except Exception:
+                    break
+        _session_memories[session_id] = mem
     return _session_memories[session_id]
 
 class _MemoryFacade:
@@ -113,7 +195,20 @@ class _MemoryFacade:
         session_id = None
         if isinstance(inputs, dict):
             session_id = inputs.pop("session_id", None)
-        self(session_id or self._default_session_id).save_context(inputs, outputs)
+        mem = self(session_id or self._default_session_id)
+        mem.save_context(inputs, outputs)
+        # Persist to Redis (best-effort, non-blocking)
+        try:
+            raw = mem.load_memory_variables({"input": inputs.get("input", "")})
+            summary = raw.get("summary_history") or raw.get("history")
+            entities = raw.get("entities")
+            _persist_to_redis(session_id or self._default_session_id,
+                              inputs.get("input", ""),
+                              outputs.get("output", ""),
+                              summary,
+                              entities)
+        except Exception:
+            pass
 
     def clear(self) -> None:
         reset_memory(self._default_session_id)
@@ -136,7 +231,10 @@ def reset_memory(session_id: str | None = None) -> None:
     """
     if session_id is None:
         _session_memories.clear()
+        # Do not global-delete Redis content from here
         return
+    _session_memories.pop(session_id, None)
+    _clear_redis(session_id)
     _session_memories[session_id] = _build_memory()
 
 
