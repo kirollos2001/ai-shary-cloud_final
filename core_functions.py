@@ -7,6 +7,7 @@ import config
 import functions
 import variables
 from memory_manager import memory_manager
+from session_store import get_session
 
 
 def check_gemini_setup():
@@ -210,7 +211,11 @@ async def process_gemini_response_async(model, user_message, session_id=None):
 
                             # Add client info for scheduling
                             if function_name == "schedule_viewing":
-                                client_info = config.client_sessions.get(session_id, {})
+                                client_info = (
+                                    config.client_sessions.get(session_id, {})
+                                    or get_session(session_id)
+                                    or {}
+                                )
                                 function_args.update({
                                     "client_id": client_info.get("user_id", 1),
                                     "name": client_info.get("name", "Unknown"),
@@ -225,7 +230,11 @@ async def process_gemini_response_async(model, user_message, session_id=None):
                                     function_args["session_id"] = session_id
                                 
                                 try:
-                                    client_info = config.client_sessions.get(session_id, {})
+                                    client_info = (
+                                        config.client_sessions.get(session_id, {})
+                                        or get_session(session_id)
+                                        or {}
+                                    )
                                     user_id = client_info.get("user_id")
                                     if user_id:
                                         prefs = functions.get_conversation_preferences(session_id, user_id)
@@ -241,7 +250,11 @@ async def process_gemini_response_async(model, user_message, session_id=None):
                             # For insight queries: ensure we pass inferred location/type if present in context
                             if function_name == "insight_search":
                                 try:
-                                    client_info = config.client_sessions.get(session_id, {})
+                                    client_info = (
+                                        config.client_sessions.get(session_id, {})
+                                        or get_session(session_id)
+                                        or {}
+                                    )
                                     user_id = client_info.get("user_id")
                                     if user_id:
                                         prefs = functions.get_conversation_preferences(session_id, user_id)
@@ -306,4 +319,3 @@ def get_resource_files():
             if os.path.isfile(file_path):
                 file_paths.append(file_path)
     return file_paths
-
