@@ -5,11 +5,24 @@ import time
 import tempfile
 from filelock import FileLock
 
-from config import get_db_connection
+# ملاحظة: بلاش import من config/db_operations على مستوى الملف لتجنب circular imports
+# هنستورد جوّه الدوال بس عند الحاجة.
 
 CACHE_DIR = "cache"
-if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
+# إنشاء الفولدر بأمان حتى مع تعدد الـworkers (race-safe)
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# فلاج لتعطيل أي عمليات DB مؤقتًا (أثناء النشر الأول/التجربة)
+SKIP_DB_INIT = os.getenv("SKIP_DB_INIT") == "1"
+
+def _db_config_ok():
+    """تأكد من توفر مفاتيح الـDB الأساسية قبل أي اتصال"""
+    required = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]
+    missing = [k for k in required if not os.getenv(k)]
+    if missing:
+        logging.warning(f"DB config missing keys: {missing} — skipping DB ops.")
+        return False
+    return True
 
 def save_to_cache(filename, data):
     path = os.path.join(CACHE_DIR, filename)
@@ -69,7 +82,7 @@ def upsert_to_cache(filename, entry, key_field):
     """
     path = os.path.join(CACHE_DIR, filename)
     data = load_from_cache(filename)
-    
+
     # Find existing entry
     updated = False
     for i, existing in enumerate(data):
@@ -77,12 +90,13 @@ def upsert_to_cache(filename, entry, key_field):
             data[i] = entry
             updated = True
             break
-    
+
     # If not found, append new entry
     if not updated:
         data.append(entry)
-    
+
     save_to_cache(filename, data)
+
 def enrich_units_with_names():
     query = """
     SELECT 
@@ -106,6 +120,9 @@ def enrich_units_with_names():
     LEFT JOIN cities ci ON a.country_id = ci.country_id
     WHERE u.status = 1
     """
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping enrich_units_with_names DB fetch (SKIP_DB_INIT or DB config missing).")
+        return []
     from db_operations import fetch_data
     try:
         logging.info("🔍 Fetching enriched units from database...")
@@ -118,12 +135,11 @@ def enrich_units_with_names():
         logging.error(f"❌ Failed to fetch units: {e}")
         return []
 
-
-
-
-import logging
-
 def cache_units_from_db():
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping units DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("units.json", [])
+        return
     from config import get_db_connection
     cursor = None
     connection = None
@@ -132,7 +148,6 @@ def cache_units_from_db():
         connection = get_db_connection()
         cursor = connection.cursor(dictionary=True)
 
-        # Join units with compounds to get compound name_ar, name_en, image, and video
         cursor.execute("""
             SELECT u.*, c.name_ar AS compound_name_ar, c.name_en AS compound_name_en,
                    c.image AS compound_image, c.video AS compound_video
@@ -141,11 +156,7 @@ def cache_units_from_db():
         """)
         units = cursor.fetchall()
 
-        # Add new_image field to each unit
         for unit in units:
-            # Logic for units: 
-            # If image is not null: https://shary.eg/images/compounds/units/ + image
-            # If image is null: https://shary.eg/images/compounds/ + compound_image
             if unit.get('image'):
                 unit['new_image'] = f"https://shary.eg/images/compounds/units/{unit['image']}"
             elif unit.get('compound_image'):
@@ -159,12 +170,22 @@ def cache_units_from_db():
         logging.error(f"❌ Failed to fetch units: {e}")
         save_to_cache("units.json", [])
     finally:
-        if cursor:
-            cursor.close()
-        if connection:
-            connection.close()
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 def cache_devlopers_from_db():
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping developers DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("developers.json", [])
+        return
     from db_operations import fetch_data
     try:
         developers = fetch_data("SELECT * FROM developers")
@@ -172,7 +193,12 @@ def cache_devlopers_from_db():
         logging.info(f"✅ Saved {len(developers)} developers to cache")
     except Exception as e:
         logging.error(f"❌ Error caching developers: {e}")
+
 def cache_new_launches_from_db():
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping new launches DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("new_launches.json", [])
+        return
     from db_operations import fetch_data
     try:
         new_launches_query = """
@@ -191,22 +217,24 @@ def cache_new_launches_from_db():
         LEFT JOIN property_settings pt ON c.property_id = pt.id AND pt.type = 'property'
         LEFT JOIN cities ci ON c.area_id = ci.id
         """
-
         new_launches = fetch_data(new_launches_query)
-        
-        # Add new_image field to each new launch
+
         for launch in new_launches:
-            # Logic for new launches: https://shary.eg/images/new_launch/ + image
             if launch.get('image'):
                 launch['new_image'] = f"https://shary.eg/images/new_launch/{launch['image']}"
             else:
                 launch['new_image'] = ""
-        
+
         save_to_cache("new_launches.json", new_launches)
         logging.info(f"✅ Saved {len(new_launches)} new launches to cache (with compound names, media, and new_image)")
     except Exception as e:
         logging.error(f"❌ Error caching new launches: {e}")
+
 def cache_leads_from_db():
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping leads DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("leads.json", [])
+        return
     from db_operations import fetch_data
     try:
         leads = fetch_data("SELECT * FROM leads")
@@ -216,6 +244,9 @@ def cache_leads_from_db():
         logging.error(f"❌ Failed to cache leads: {e}")
 
 def sync_leads_to_db():
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping sync_leads_to_db (SKIP_DB_INIT or DB config missing).")
+        return
     from db_operations import execute_query
     leads = load_from_cache("leads_updates.json")
     if not leads:
@@ -226,7 +257,7 @@ def sync_leads_to_db():
         try:
             user_id = lead.get("user_id")
             existing = load_from_cache("leads.json")
-            match = next((l for l in existing if l["user_id"] == user_id), None)
+            match = next((l for l in existing if l.get("user_id") == user_id), None)
 
             if match:
                 # UPDATE
@@ -264,7 +295,12 @@ def sync_leads_to_db():
 
     save_to_cache("leads_updates.json", [])
     logging.info(f"✅ Synced {len(leads)} leads to DB and cleared leads_updates.json")
+
 def cache_conversations_from_db():
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping conversations DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("conversations.json", [])
+        return
     from db_operations import fetch_data
     try:
         conversations = fetch_data("SELECT * FROM conversations")
@@ -273,9 +309,10 @@ def cache_conversations_from_db():
     except Exception as e:
         logging.error(f"❌ Failed to cache conversations: {e}")
 
-
-
 def sync_conversations_to_db():
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping sync_conversations_to_db (SKIP_DB_INIT or DB config missing).")
+        return
     from db_operations import execute_query
     convos = load_from_cache("conversations_updates.json")
     if not convos:
@@ -309,4 +346,3 @@ def sync_conversations_to_db():
 
     save_to_cache("conversations_updates.json", [])
     logging.info(f"✅ Synced {len(convos)} conversations to DB and cleared conversations_updates.json")
-
