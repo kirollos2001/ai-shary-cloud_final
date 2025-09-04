@@ -8,7 +8,154 @@ import functions
 import variables
 from memory_manager import memory_manager
 from session_store import get_session
+import re
 
+def parse_function_call_from_text(response_text):
+    """
+    Parse function calls from LLM text response and execute them
+    Returns: dict with function_output and function_name if found, None otherwise
+    """
+    try:
+        # Check for unit detail requests first (special case)
+        unit_detail_patterns = [
+            r'تفاصيل الوحدة.*?(\d+)',
+            r'تفاصيل.*?(\d+)',
+            r'وحدة.*?(\d+)',
+            r'unit.*?(\d+)',
+            r'id.*?(\d+)',
+            r'رقم.*?(\d+)'
+        ]
+        
+        for pattern in unit_detail_patterns:
+            match = re.search(pattern, response_text, re.IGNORECASE)
+            if match:
+                unit_id = match.group(1)
+                logging.info(f"🔧 Detected unit detail request for ID: {unit_id}")
+                
+                try:
+                    function_to_call = getattr(functions, 'get_unit_details')
+                    output = function_to_call({"unit_id": unit_id})
+                    logging.info(f"✅ get_unit_details executed successfully for ID: {unit_id}")
+                    
+                    return {
+                        "function_output": output,
+                        "function_name": "get_unit_details"
+                    }
+                except Exception as e:
+                    logging.error(f"🚫 Error executing get_unit_details: {e}")
+                    return {
+                        "error": f"Error executing get_unit_details: {str(e)}"
+                    }
+        # Pattern 1: _call:function_name(...)
+        pattern1 = r'_call:(\w+)\(([^)]+)\)'
+        match1 = re.search(pattern1, response_text)
+        
+        # Pattern 2: استدعي الأداة `function_name` بالمعلومات التالية:
+        pattern2 = r'استدعي الأداة\s+`(\w+)`\s+بالمعلومات التالية:'
+        match2 = re.search(pattern2, response_text)
+        
+        # Pattern 3: ```python function_name(...)```
+        pattern3 = r'```python\s+(\w+)\(([^)]+)\)'
+        match3 = re.search(pattern3, response_text)
+        
+        # Pattern 4: function_name(...) in text
+        pattern4 = r'(\w+)\(([^)]+)\)'
+        match4 = re.search(pattern4, response_text)
+        
+        function_name = None
+        function_args_str = None
+        
+        if match1:
+            function_name = match1.group(1)
+            function_args_str = match1.group(2)
+        elif match2:
+            function_name = match2.group(1)
+            # Extract arguments from the following lines
+            lines = response_text.split('\n')
+            for i, line in enumerate(lines):
+                if 'استدعي الأداة' in line:
+                    # Look for arguments in subsequent lines
+                    args_lines = lines[i+1:i+10]  # Check next 10 lines
+                    function_args_str = '\n'.join(args_lines)
+                    break
+        elif match3:
+            function_name = match3.group(1)
+            function_args_str = match3.group(2)
+        elif match4:
+            function_name = match4.group(1)
+            function_args_str = match4.group(2)
+        
+        if function_name and function_args_str:
+            logging.info(f"🔧 Parsed function call: {function_name} with args: {function_args_str}")
+            
+            # Parse arguments
+            function_args = {}
+            
+            # Try to parse key-value pairs
+            if ':' in function_args_str:
+                # Handle key: value format
+                pairs = re.findall(r'`?(\w+)`?\s*:\s*`?"?([^`"\n,]+)`?"?', function_args_str)
+                for key, value in pairs:
+                    # Clean up the value
+                    value = value.strip().strip('"').strip("'")
+                    # Convert to appropriate type
+                    if value.isdigit():
+                        function_args[key] = int(value)
+                    elif value.replace('.', '').isdigit():
+                        function_args[key] = float(value)
+                    else:
+                        function_args[key] = value
+            else:
+                # Handle comma-separated format
+                args = function_args_str.split(',')
+                for arg in args:
+                    if '=' in arg:
+                        key, value = arg.split('=', 1)
+                        key = key.strip()
+                        value = value.strip().strip('"').strip("'")
+                        if value.isdigit():
+                            function_args[key] = int(value)
+                        elif value.replace('.', '').isdigit():
+                            function_args[key] = float(value)
+                        else:
+                            function_args[key] = value
+            
+            # Map common parameter names
+            if 'max_price' in function_args:
+                function_args['budget'] = function_args.pop('max_price')
+            if 'min_bedrooms' in function_args:
+                function_args['bedrooms'] = function_args.pop('min_bedrooms')
+            if 'max_bedrooms' in function_args:
+                function_args['bedrooms'] = function_args.pop('max_bedrooms')
+            if 'city' in function_args:
+                function_args['location'] = function_args.pop('city')
+            if 'exclude_ids' in function_args:
+                function_args['excluded_ids'] = function_args.pop('exclude_ids')
+            
+            logging.info(f"🔧 Parsed arguments: {function_args}")
+            
+            # Execute the function
+            try:
+                function_to_call = getattr(functions, function_name)
+                output = function_to_call(function_args)
+                logging.info(f"✅ Function {function_name} executed successfully!")
+                
+                return {
+                    "function_output": output,
+                    "function_name": function_name
+                }
+                
+            except Exception as e:
+                logging.error(f"🚫 Error executing function {function_name}: {e}")
+                return {
+                    "error": f"Error executing function {function_name}: {str(e)}"
+                }
+        
+        return None
+        
+    except Exception as e:
+        logging.error(f"🚫 Error parsing function call: {e}")
+        return None
 
 def check_gemini_setup():
     """Check if Gemini API is properly configured"""
@@ -30,10 +177,10 @@ import asyncio
 conversation_memory = {}
 
 def get_conversation_context(session_id):
-    """Get conversation context for a session using LangChain memory"""
+    """Get conversation context for a session using Gemini chat sessions"""
     try:
-        # Always provide a valid input key
-        memory_vars = memory_manager.load_memory_variables({"input": "context", "session_id": session_id})
+        # Get chat session from memory manager
+        chat = memory_manager(session_id)
         
         # Get legacy context for backward compatibility
         if session_id not in conversation_memory:
@@ -44,11 +191,14 @@ def get_conversation_context(session_id):
                 "user_info": {}
             }
         
-        # Combine LangChain memory with legacy context
+        # Combine Gemini chat session with legacy context
         context = conversation_memory[session_id].copy()
+        
+        # Note: Gemini chat sessions handle memory internally
+        # We don't need to extract summary/entities manually
         context.update({
-            "summary": memory_vars.get("history", ""),
-            "entities": memory_vars.get("entities", {})
+            "summary": "",  # Gemini handles this internally
+            "entities": {}   # Gemini handles this internally
         })
         
         return context
@@ -65,7 +215,7 @@ def get_conversation_context(session_id):
         }
 
 def update_conversation_context(session_id, key, value):
-    """Update conversation context using LangChain memory"""
+    """Update conversation context using Gemini chat sessions"""
     try:
         if key == "current_search_results":
             memory_manager.update_search_results(session_id, value)
@@ -139,11 +289,9 @@ def extract_user_preferences_from_message(user_message):
     return preferences
 
 async def process_gemini_response_async(model, user_message, session_id=None):
-    """Process Gemini response and handle automatic function calls with LangChain memory"""
+    """Process Gemini response using built-in chat sessions with memory and automatic function calling"""
     try:
-        # Defer memory save until we have both input and output (paired)
-        
-        # Get conversation context using LangChain memory
+        # Get conversation context using Gemini chat sessions
         context = get_conversation_context(session_id)
         
         # Extract new preferences from current message
@@ -152,18 +300,8 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         # Get updated context after preference update
         context = get_conversation_context(session_id)
         
-        # Create enhanced context-aware prompt with LangChain memory
+        # Create enhanced context-aware prompt with Gemini chat sessions
         context_prompt = ""
-        
-        # Add conversation summary
-        if context.get("summary"):
-            context_prompt += f"\n### ملخص المحادثة السابقة:\n{context['summary']}\n"
-        
-        # Add entity memory (extracted preferences and entities)
-        if context.get("entities"):
-            context_prompt += f"\n### المعلومات المحفوظة عن المستخدم:\n"
-            for key, value in context["entities"].items():
-                context_prompt += f"- {key}: {value}\n"
         
         # Add current preferences
         if context.get("preferences", {}):
@@ -175,9 +313,12 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         system_prompt = f"{config.assistant_instructions}\n\n### Examples:\n{config.examples}"
         full_prompt = f"{system_prompt}\n\n{context_prompt}\n\n### رسالة المستخدم:\n{user_message}"
         
-        # Generate response from Gemini with automatic function calling
+        # Get chat session for this session_id
+        chat = memory_manager(session_id)
+        
+        # Send message to chat session (this automatically handles memory)
         logging.info(f"Generating response for user message: {user_message[:100]}...")
-        response = model.generate_content(full_prompt)
+        response = chat.send_message(full_prompt)
         
         # Check if response contains function calls
         if hasattr(response, 'candidates') and response.candidates:
@@ -285,16 +426,78 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         
         # If no function call, get the text response
         response_text = response.text if response.text else "❌ لم يتم استلام رد من المساعد."
+        
+        # Try to parse function calls from text response
+        function_result = parse_function_call_from_text(response_text)
+        if function_result:
+            logging.info(f"🔧 Function call parsed from text: {function_result.get('function_name')}")
+            return function_result
+        
+        # Also check the original user message for unit detail requests
+        user_function_result = parse_function_call_from_text(user_message)
+        if user_function_result:
+            logging.info(f"🔧 Function call parsed from user message: {user_function_result.get('function_name')}")
+            return user_function_result
+        
+        # Check if we should trigger a search based on conversation context
+        if session_id:
+            try:
+                client_info = (
+                    config.client_sessions.get(session_id, {})
+                    or get_session(session_id)
+                    or {}
+                )
+                user_id = client_info.get("user_id")
+                if user_id:
+                    prefs = functions.get_conversation_preferences(session_id, user_id)
+                    
+                    # Check if we have the minimum required information for a search
+                    has_location = prefs.get("location") or "القاهرة الجديدة" in user_message or "العاصمة" in user_message
+                    has_budget = prefs.get("budget", 0) > 0
+                    has_property_type = prefs.get("property_type") or "شقة" in user_message or "فيلا" in user_message
+                    
+                    # If we have enough info and user seems ready for search, trigger it
+                    if has_location and has_budget and has_property_type:
+                        logging.info(f"🔍 Auto-triggering search with preferences: {prefs}")
+                        
+                        # Determine if it should be new launch or existing unit search
+                        query_type = functions.classify_query_type_with_llm(user_message)
+                        
+                        if query_type == "new_launch":
+                            function_args = {
+                                "property_type": prefs.get("property_type", "شقة"),
+                                "location": prefs.get("location", "القاهرة الجديدة"),
+                                "compound": prefs.get("compound_name", ""),
+                                "session_id": session_id
+                            }
+                            output = functions.search_new_launches(function_args)
+                            return {
+                                "function_output": output,
+                                "function_name": "search_new_launches"
+                            }
+                        else:
+                            # Default to existing units search
+                            function_args = {
+                                "location": prefs.get("location", "القاهرة الجديدة"),
+                                "budget": prefs.get("budget", 0),
+                                "property_type": prefs.get("property_type", "شقة"),
+                                "bedrooms": prefs.get("bedrooms", 0),
+                                "bathrooms": prefs.get("bathrooms", 0),
+                                "compound": prefs.get("compound_name", ""),
+                                "session_id": session_id
+                            }
+                            output = functions.property_search(function_args)
+                            return {
+                                "function_output": output,
+                                "function_name": "property_search"
+                            }
+            except Exception as e:
+                logging.warning(f"Could not auto-trigger search: {e}")
+        
         logging.info(f"Gemini text response: {response_text[:200]}...")
         
-        # Save user input and AI output together into session-scoped memory
-        try:
-            memory_manager.save_context(
-                {"input": user_message, "session_id": session_id},
-                {"output": response_text}
-            )
-        except Exception as e:
-            logging.warning(f"Failed to save AI response to memory manager: {e}")
+        # Note: Memory is automatically saved by the chat session
+        # No need to manually save context - Gemini handles it internally
         
         # Return the text response
         return {
