@@ -25,7 +25,7 @@ import atexit
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, make_response
 import google.generativeai as genai
 from google.generativeai import types
 
@@ -171,7 +171,9 @@ def chat():
 
     data = request.json or {}
     thread_id = data.get("thread_id")
-    user_message = f"Current Date: {datetime.datetime.now().strftime('%B %d, %Y')}\n" + data.get('message', '')
+    # Use the raw user message without prefixing date/time to avoid
+    # breaking downstream regex extractors (e.g., bedrooms).
+    user_message = data.get('message', '')
 
     logging.info(f"Received /chat request: thread_id={thread_id}, user_message={user_message}")
 
@@ -313,6 +315,191 @@ def chat():
             loop.close()
         logging.info(f"Result from run_async_tool_calls: {result}")
 
+        # Early fallback: if the model errored, try to run a search directly
+        try:
+            if result and "error" in result:
+                auto_triggered = False
+                prefs = {}
+                try:
+                    prefs = functions.get_conversation_preferences(thread_id, user_id)
+                except Exception:
+                    prefs = {}
+
+                merged_prefs = functions.extract_client_preferences_llm(user_message, current_preferences=prefs) or {}
+
+                # Merge with last known lead (cached) if present
+                try:
+                    from Cache_code import load_from_cache as _load_cache
+                    cached_leads = _load_cache("leads_cache.json") or []
+                    last_lead = next((l for l in cached_leads if str(l.get("user_id")) == str(user_id)), None)
+                    if last_lead:
+                        for k in ["budget", "location", "property_type", "bedrooms", "bathrooms"]:
+                            if not merged_prefs.get(k) and last_lead.get(k):
+                                merged_prefs[k] = last_lead.get(k)
+                except Exception:
+                    pass
+
+                # If user is asking for unit details by ID, handle first
+                try:
+                    import re as _re
+                    msg_clean = (user_message or "").strip()
+                    id_match = _re.search(r"\bID[:：]?\s*(\d+)\b", msg_clean, flags=_re.IGNORECASE)
+                    if not id_match and msg_clean.isdigit() and 3 <= len(msg_clean) <= 8:
+                        id_match = [_re.match(r"(\d+)", msg_clean)] if msg_clean else None
+                        id_val = msg_clean
+                    else:
+                        id_val = id_match.group(1) if id_match else None
+                    if id_val:
+                        details_out = functions.get_unit_details({"unit_id": id_val})
+                        if isinstance(details_out, dict):
+                            msg = details_out.get('message') or details_out.get('error') or str(details_out)
+                            bot_response = msg
+                            auto_triggered = True
+                except Exception:
+                    pass
+
+                if auto_triggered:
+                    response_data = {"response": bot_response, "thread_id": thread_id}
+                    try:
+                        executor.submit(functions.create_lead, lead_data)
+                    except Exception as e:
+                        logging.warning(f"Background lead creation failed: {e}")
+                    try:
+                        executor.submit(functions.log_conversation_to_db, thread_id, user_id, user_message)
+                    except Exception as e:
+                        logging.warning(f"Background user conversation logging failed: {e}")
+                    try:
+                        executor.submit(functions.log_conversation_to_db, thread_id, "bot", bot_response)
+                    except Exception as e:
+                        logging.warning(f"Background bot response logging failed: {e}")
+                    return jsonify(response_data)
+
+                # Heuristics for common Arabic inputs
+                try:
+                    txt = user_message.lower()
+                    if not merged_prefs.get("location"):
+                        if "القاهرة الجديدة" in user_message or "new cairo" in txt:
+                            merged_prefs["location"] = "القاهرة الجديدة"
+                    if not merged_prefs.get("property_type"):
+                        if "شقة" in user_message or "apartment" in txt:
+                            merged_prefs["property_type"] = "شقة"
+                    if not merged_prefs.get("bedrooms"):
+                        import re
+                        if "غرفتين" in user_message:
+                            merged_prefs["bedrooms"] = 2
+                        else:
+                            m = re.search(r"(\d+)\s*غرف", user_message)
+                            if m:
+                                merged_prefs["bedrooms"] = int(m.group(1))
+                except Exception:
+                    pass
+
+                # If still no location, try scan conversation history for keywords
+                try:
+                    if not merged_prefs.get("location"):
+                        conversations = functions.load_from_cache("conversations_cache.json")
+                        convo = next((c for c in conversations if str(c.get("conversation_id")) == str(thread_id)), None)
+                        if convo:
+                            desc = convo.get("description", [])
+                            for msg in desc:
+                                text = (msg.get("message") or "")
+                                if "القاهرة الجديدة" in text:
+                                    merged_prefs["location"] = "القاهرة الجديدة"
+                                    break
+                except Exception:
+                    pass
+
+                # If user explicitly asked for launches, call new launch search
+                try:
+                    if any(k in user_message for k in ["إطلاق", "اطلاق", "اطلاقات جديدة"]) or any(k in txt for k in ["new launch", "launches", "launch"]):
+                        nl_args = {
+                            "property_type": merged_prefs.get("property_type", ""),
+                            "location": merged_prefs.get("location", ""),
+                            "compound": merged_prefs.get("compound_name", ""),
+                            "session_id": thread_id,
+                        }
+                        nl_out = functions.search_new_launches(nl_args)
+                        message = nl_out.get('message', '') if isinstance(nl_out, dict) else ''
+                        results = nl_out.get('results', []) if isinstance(nl_out, dict) else []
+                        follow_up = nl_out.get('follow_up', '') if isinstance(nl_out, dict) else ''
+                        results_str = "\n".join(results) if isinstance(results, list) else str(results)
+                        bot_response = f"{message}\n\n{results_str}\n{follow_up}".strip()
+                        auto_triggered = True
+                except Exception:
+                    pass
+
+                if auto_triggered:
+                    response_data = {"response": bot_response, "thread_id": thread_id}
+                    try:
+                        executor.submit(functions.create_lead, lead_data)
+                    except Exception as e:
+                        logging.warning(f"Background lead creation failed: {e}")
+                    try:
+                        executor.submit(functions.log_conversation_to_db, thread_id, user_id, user_message)
+                    except Exception as e:
+                        logging.warning(f"Background user conversation logging failed: {e}")
+                    try:
+                        executor.submit(functions.log_conversation_to_db, thread_id, "bot", bot_response)
+                    except Exception as e:
+                        logging.warning(f"Background bot response logging failed: {e}")
+                    return jsonify(response_data)
+
+                has_location = bool(merged_prefs.get("location"))
+                has_budget = merged_prefs.get("budget", 0) > 0
+                has_property_type = bool(merged_prefs.get("property_type"))
+                logging.info(f"Auto-trigger (error fallback) — loc:{has_location} budget:{has_budget} type:{has_property_type}")
+
+                # Relax: trigger if at least two core signals are present
+                if (has_budget and has_property_type) or (has_budget and has_location) or (has_property_type and has_location):
+                    search_args = {
+                        "location": merged_prefs.get("location", ""),
+                        "budget": merged_prefs.get("budget", 0),
+                        "property_type": merged_prefs.get("property_type", ""),
+                        "bedrooms": merged_prefs.get("bedrooms", 0),
+                        "bathrooms": merged_prefs.get("bathrooms", 0),
+                        "compound": merged_prefs.get("compound_name", "")
+                    }
+                    function_output = functions.property_search(search_args)
+                    if function_output:
+                        if function_output.get('results'):
+                            results = function_output.get('results', [])
+                            real_results_str = ""
+                            for line in results[:10]:
+                                if isinstance(line, str):
+                                    real_results_str += line + "\n"
+                                elif isinstance(line, dict):
+                                    real_results_str += (
+                                        f"ID:{line.get('id','N/A')} | "
+                                        f"{line.get('name_ar', line.get('name_en','N/A'))} | "
+                                        f"Price: {line.get('price', 'N/A')} | "
+                                        f"Rooms: {line.get('Bedrooms', line.get('bedrooms','N/A'))} | "
+                                        f"Baths: {line.get('Bathrooms', line.get('bathrooms','N/A'))}\n"
+                                    )
+                            message = function_output.get('message', '')
+                            follow_up = function_output.get('follow_up', '')
+                            bot_response = f"{message}\n\n{real_results_str}\n{follow_up}".strip()
+                        else:
+                            bot_response = function_output.get('message', str(function_output))
+                        auto_triggered = True
+
+                if auto_triggered:
+                    response_data = {"response": bot_response, "thread_id": thread_id}
+                    try:
+                        executor.submit(functions.create_lead, lead_data)
+                    except Exception as e:
+                        logging.warning(f"Background lead creation failed: {e}")
+                    try:
+                        executor.submit(functions.log_conversation_to_db, thread_id, user_id, user_message)
+                    except Exception as e:
+                        logging.warning(f"Background user conversation logging failed: {e}")
+                    try:
+                        executor.submit(functions.log_conversation_to_db, thread_id, "bot", bot_response)
+                    except Exception as e:
+                        logging.warning(f"Background bot response logging failed: {e}")
+                    return jsonify(response_data)
+        except Exception as _fe:
+            logging.warning(f"Early error-fallback search block failed: {_fe}")
+
         if result and "error" in result:
             bot_response = f"❌ خطأ: {result['error']}"
         elif result and "function_output" in result:
@@ -390,7 +577,124 @@ def chat():
             else:
                 bot_response = function_output.get('message') or f"✅ تم تنفيذ {function_name} بنجاح: {function_output}"
         elif result and "text_response" in result:
-            bot_response = result["text_response"]
+            # Try to auto-trigger a search if enough info is present
+            auto_triggered = False
+            try:
+                prefs = {}
+                try:
+                    prefs = functions.get_conversation_preferences(thread_id, user_id)
+                except Exception:
+                    prefs = {}
+                merged_prefs = functions.extract_client_preferences_llm(user_message, current_preferences=prefs)
+                # Merge with last known lead (cached) if present
+                try:
+                    from Cache_code import load_from_cache as _load_cache
+                    cached_leads = _load_cache("leads_cache.json") or []
+                    last_lead = next((l for l in cached_leads if str(l.get("user_id")) == str(user_id)), None)
+                    if last_lead:
+                        for k in ["budget", "location", "property_type", "bedrooms", "bathrooms"]:
+                            if not merged_prefs.get(k) and last_lead.get(k):
+                                merged_prefs[k] = last_lead.get(k)
+                except Exception:
+                    pass
+
+                # 1) Unit details intent (by ID or 'تفاصيل')
+                try:
+                    import re as _re
+                    msg_clean = (user_message or "").strip()
+                    id_match = _re.search(r"\bID[:：]?\s*(\d+)\b", msg_clean, flags=_re.IGNORECASE)
+                    id_val = None
+                    if id_match:
+                        id_val = id_match.group(1)
+                    elif msg_clean.isdigit() and 3 <= len(msg_clean) <= 8:
+                        id_val = msg_clean
+                    if ("تفاصيل" in user_message or "details" in user_message.lower() or id_val):
+                        if id_val:
+                            details_out = functions.get_unit_details({"unit_id": id_val})
+                            if isinstance(details_out, dict):
+                                msg = details_out.get('message') or details_out.get('error') or str(details_out)
+                                bot_response = msg
+                                auto_triggered = True
+                except Exception:
+                    pass
+
+                # 2) New launches intent
+                if not auto_triggered:
+                    try:
+                        txt = user_message.lower()
+                        if any(k in user_message for k in ["إطلاق", "اطلاق", "اطلاقات جديدة"]) or any(k in txt for k in ["new launch", "launches", "launch"]):
+                            nl_args = {
+                                "property_type": merged_prefs.get("property_type", ""),
+                                "location": merged_prefs.get("location", ""),
+                                "compound": merged_prefs.get("compound_name", ""),
+                                "session_id": thread_id,
+                            }
+                            nl_out = functions.search_new_launches(nl_args)
+                            message = nl_out.get('message', '') if isinstance(nl_out, dict) else ''
+                            results = nl_out.get('results', []) if isinstance(nl_out, dict) else []
+                            follow_up = nl_out.get('follow_up', '') if isinstance(nl_out, dict) else ''
+                            results_str = "\n".join(results) if isinstance(results, list) else str(results)
+                            bot_response = f"{message}\n\n{results_str}\n{follow_up}".strip()
+                            auto_triggered = True
+                    except Exception:
+                        pass
+
+                # 3) Conversation summary intent
+                if not auto_triggered:
+                    try:
+                        if any(k in user_message for k in ["ملخص"]) or ("summary" in user_message.lower()):
+                            name = client_info.get("name", "Unknown") if isinstance(client_info, dict) else "Unknown"
+                            phone = client_info.get("phone", "Unknown") if isinstance(client_info, dict) else "Unknown"
+                            email = client_info.get("email", "Unknown") if isinstance(client_info, dict) else "Unknown"
+                            summary_text = functions.enhanced_conversation_summary_with_client_info(
+                                user_id, thread_id, name, phone, email, None, None, None, None
+                            )
+                            bot_response = summary_text if isinstance(summary_text, str) else str(summary_text)
+                            auto_triggered = True
+                    except Exception:
+                        pass
+
+                has_location = bool(merged_prefs.get("location"))
+                has_budget = merged_prefs.get("budget", 0) > 0
+                has_property_type = bool(merged_prefs.get("property_type"))
+                logging.info(f"Auto-trigger (text fallback) — loc:{has_location} budget:{has_budget} type:{has_property_type}")
+                if has_location and has_budget and has_property_type:
+                    search_args = {
+                        "location": merged_prefs.get("location"),
+                        "budget": merged_prefs.get("budget", 0),
+                        "property_type": merged_prefs.get("property_type"),
+                        "bedrooms": merged_prefs.get("bedrooms", 0),
+                        "bathrooms": merged_prefs.get("bathrooms", 0),
+                        "compound": merged_prefs.get("compound_name", "")
+                    }
+                    function_output = functions.property_search(search_args)
+                    # Format like property_search branch if results exist
+                    if function_output and function_output.get('results'):
+                        results = function_output.get('results', [])
+                        real_results_str = ""
+                        for line in results[:10]:
+                            if isinstance(line, str):
+                                real_results_str += line + "\n"
+                            elif isinstance(line, dict):
+                                real_results_str += (
+                                    f"ID:{line.get('id','N/A')} | "
+                                    f"{line.get('name_ar', line.get('name_en','N/A'))} | "
+                                    f"Price: {line.get('price', 'N/A')} | "
+                                    f"Rooms: {line.get('Bedrooms', line.get('bedrooms','N/A'))} | "
+                                    f"Baths: {line.get('Bathrooms', line.get('bathrooms','N/A'))}\n"
+                                )
+                        message = function_output.get('message', '')
+                        follow_up = function_output.get('follow_up', '')
+                        bot_response = f"{message}\n\n{real_results_str}\n{follow_up}".strip()
+                        auto_triggered = True
+                    else:
+                        # If no results, fall back to model text
+                        bot_response = result["text_response"]
+                        auto_triggered = True
+            except Exception as _e:
+                logging.warning(f"Auto-trigger via text fallback failed: {_e}")
+            if not auto_triggered:
+                bot_response = result["text_response"]
         else:
             bot_response = "❌ لم يتم استلام رد من المساعد."
             logging.warning("No valid response from Gemini or tool calls.")
