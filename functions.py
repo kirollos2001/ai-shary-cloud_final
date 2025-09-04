@@ -601,7 +601,7 @@ def property_search(arguments):
     """
     import time
     start_time = time.time()
-    max_execution_time = 15.0  # 15 seconds timeout (increased from 8)
+    max_execution_time = 10.0  # 15 seconds timeout (increased from 8)
     
     try:
         # Mandatory fields
@@ -1819,9 +1819,18 @@ def extract_client_preferences_llm(user_message, conversation_history=None, curr
         if current_client_info:
             enhanced_preferences.update(current_client_info)
         
-        # Use existing LLM extraction for other preferences
+        # Use existing extraction for other preferences
         llm_preferences = extract_client_preferences(user_message)
         enhanced_preferences.update(llm_preferences)
+
+        # Sanitize impossible numeric values (e.g., years accidentally parsed as bedrooms)
+        try:
+            if isinstance(enhanced_preferences.get("bedrooms"), int) and enhanced_preferences["bedrooms"] > 10:
+                enhanced_preferences["bedrooms"] = 0
+            if isinstance(enhanced_preferences.get("bathrooms"), int) and enhanced_preferences["bathrooms"] > 10:
+                enhanced_preferences["bathrooms"] = 0
+        except Exception:
+            pass
         
         logging.info(f"✅ Extracted client info: {current_client_info}")
         logging.info(f"✅ Enhanced preferences: {enhanced_preferences}")
@@ -3009,6 +3018,5 @@ def advanced_conversation_summary_from_db(client_id, conversation_id, name="Unkn
     except Exception as e:
         print(f"🚨 Error generating summary: {e}")
         return f"❌ حصل خطأ أثناء تلخيص المحادثة: {e}"
-
 
 
