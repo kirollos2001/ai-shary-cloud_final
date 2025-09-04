@@ -83,6 +83,9 @@ class RealEstateRAG:
         chroma_settings = Settings(anonymized_telemetry=False, allow_reset=True)
         self.client = chromadb.PersistentClient(path=persist_directory, settings=chroma_settings)
         self.embedder = GeminiEmbeddingFunction(variables.GEMINI_API_KEY)
+        # Cache for query embeddings to avoid regeneration
+        self._query_embedding_cache = {}
+        
         # Initialize collections with schema-mismatch recovery
         try:
             self._create_or_get_collections()
@@ -96,18 +99,16 @@ class RealEstateRAG:
             else:
                 raise
         logger.info("ChromaDB initialized with collections")
-        return
-        self.units_collection = self.client.get_or_create_collection(
-            name="real_estate_units",
-            metadata={"description": "Real estate units data for RAG"},
-            embedding_function=self.embedder
-        )
-        self.new_launches_collection = self.client.get_or_create_collection(
-            name="new_launches",
-            metadata={"description": "New property launches data for RAG"},
-            embedding_function=self.embedder
-        )
-        logger.info("✅ ChromaDB initialized with collections")
+        
+    def _get_cached_query_embedding(self, query: str) -> List[float]:
+        """Get cached query embedding or generate and cache it"""
+        if query in self._query_embedding_cache:
+            return self._query_embedding_cache[query]
+        
+        # Generate new embedding and cache it
+        embedding = self.embedder.embed(query)
+        self._query_embedding_cache[query] = embedding
+        return embedding
     def reset_collections(self):
         """Reset collections to start fresh with correct dimensions"""
         try:
@@ -397,8 +398,8 @@ Address: {city_name}
                 try:
                     from mmr_search import mmr
                     
-                    # Generate query embedding
-                    query_embedding = self.embedder.embed(query)
+                    # Generate query embedding (cached to avoid regeneration)
+                    query_embedding = self._get_cached_query_embedding(query)
                     
                     # Extract embeddings from results (if available)
                     embeddings = []
@@ -441,6 +442,10 @@ Address: {city_name}
             return []
     def search_units(self, query: str, n_results: int = 10, filters: Dict = None) -> List[Dict]:
         """Search units collection using MMR-optimized RAG pipeline"""
+        import time
+        start_time = time.time()
+        max_execution_time = 10.0  # 10 seconds timeout (matching functions.py)
+        
         try:
             # Build where clause for filters - ChromaDB requires separate clauses for range queries
             where_clauses = []
@@ -481,13 +486,23 @@ Address: {city_name}
                     include=['embeddings', 'metadatas', 'distances', 'documents']
                 )
             
+            # Check timeout before MMR processing
+            if time.time() - start_time > max_execution_time:
+                logger.warning("⚠️ Search timeout - returning early results")
+                return self._format_direct_results(results, n_results)
+            
+            # Check timeout before MMR processing
+            if time.time() - start_time > max_execution_time:
+                logger.warning("⚠️ New launches search timeout - returning early results")
+                return self._format_direct_results(results, n_results)
+            
             # 2. Apply MMR directly for diversity and relevance
             if results and 'documents' in results and results['documents'] and results['documents'][0]:
                 logger.info(f"📊 Found {len(results['documents'][0])} documents from ChromaDB")
                 
                 try:
                     # Generate query embedding for MMR (cached to avoid redundant calls)
-                    query_embedding = self.embedder.embed(query)
+                    query_embedding = self._get_cached_query_embedding(query)
                     logger.info("✅ Generated query embedding")
                     
                     # Get embeddings from results - prefer ChromaDB embeddings to avoid regeneration
@@ -499,9 +514,9 @@ Address: {city_name}
                         logger.warning("⚠️ No embeddings returned from ChromaDB - this will cause performance issues")
                     
                     if embeddings is not None and len(embeddings) > 0:
-                        # Apply MMR algorithm for optimal diversity - reduced k for performance
+                        # Apply MMR algorithm for optimal diversity - optimized for performance
                         from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=20, lambda_param=0.9)  # Reduced from 50 to 20 for better performance
+                        mmr_indices = mmr(query_embedding, embeddings, k=10, lambda_param=0.8)  # Further reduced for better performance
                         logger.info(f"✅ MMR selected {len(mmr_indices)} indices: {mmr_indices}")
                         
                         # Get MMR-optimized results
@@ -523,6 +538,11 @@ Address: {city_name}
                         # Apply deduplication based on ID
                         deduplicated_results = self._deduplicate_results(reranked_results)
                         logger.info(f"✅ Deduplicated to {len(deduplicated_results)} results")
+                        
+                        # Check timeout before returning results
+                        if time.time() - start_time > max_execution_time:
+                            logger.warning("⚠️ Search timeout - returning early results")
+                            return deduplicated_results[:n_results]
                         
                         return deduplicated_results[:n_results]
                     else:
@@ -547,6 +567,12 @@ Address: {city_name}
         except Exception as e:
             logger.error(f"❌ Error searching units: {e}")
             return []
+        finally:
+            execution_time = time.time() - start_time
+            if execution_time > max_execution_time:
+                logger.warning(f"⚠️ Search took {execution_time:.2f}s (exceeded {max_execution_time}s limit)")
+            else:
+                logger.info(f"✅ Search completed in {execution_time:.2f}s")
     def _format_direct_results(self, results: Dict, n_results: int) -> List[Dict]:
         """Helper method to format results when MMR is not available"""
         formatted_results = []
@@ -677,6 +703,10 @@ Address: {city_name}
         return unique_results
     def search_new_launches(self, query: str, n_results: int = 10, filters: Dict = None) -> List[Dict]:
         """Search new launches collection using MMR-optimized RAG pipeline"""
+        import time
+        start_time = time.time()
+        max_execution_time = 8.0  # 8 seconds timeout
+        
         try:
             # Build where clause for filters - ChromaDB requires separate clauses for range queries
             where_clauses = []
@@ -724,7 +754,7 @@ Address: {city_name}
             if results and 'documents' in results and results['documents'] and results['documents'][0]:
                 try:
                     # Generate query embedding for MMR
-                    query_embedding = self.embedder.embed(query)
+                    query_embedding = self._get_cached_query_embedding(query)
                     
                     # Get embeddings from results or generate them
                     embeddings = None
@@ -734,7 +764,7 @@ Address: {city_name}
                     if embeddings is not None and len(embeddings) > 0:
                         # Apply MMR algorithm for optimal diversity - reduced k for performance
                         from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=20, lambda_param=0.8)  # Reduced from 50 to 20 for better performance
+                        mmr_indices = mmr(query_embedding, embeddings, k=10, lambda_param=0.8)  # Further reduced for better performance
                         
                         # Get MMR-optimized results
                         mmr_results = []
@@ -778,6 +808,12 @@ Address: {city_name}
         except Exception as e:
             logger.error(f"❌ Error searching new launches: {e}")
             return []
+        finally:
+            execution_time = time.time() - start_time
+            if execution_time > max_execution_time:
+                logger.warning(f"⚠️ New launches search took {execution_time:.2f}s (exceeded {max_execution_time}s limit)")
+            else:
+                logger.info(f"✅ New launches search completed in {execution_time:.2f}s")
     def search_all(self, query: str, n_results: int = 20) -> Dict[str, List[Dict]]:
         """Search both collections using MMR-optimized RAG pipeline"""
         try:
