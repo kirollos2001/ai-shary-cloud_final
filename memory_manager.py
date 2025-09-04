@@ -2,8 +2,9 @@ import os
 import uuid  # Added for default session_id
 import json
 from typing import Dict, Optional, List, Tuple
-from langchain.memory import ConversationSummaryMemory, ConversationEntityMemory, CombinedMemory
-from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain.memory import ConversationSummaryMemory, ConversationEntityMemory, CombinedMemory
+# from langchain_google_genai import ChatGoogleGenerativeAI
+import google.generativeai as genai
 import variables
 from redis_utils import get_redis
 
@@ -24,13 +25,7 @@ if not GOOGLE_API_KEY:
     raise ValueError("GEMINI_API_KEY is not set in variables.py")
 
 # 3) عرّف الموديل باستخدام الـ API Key فقط
-llm = ChatGoogleGenerativeAI(
-    model=variables.GEMINI_MODEL_NAME,
-    google_api_key=GOOGLE_API_KEY,
-    temperature=0.7,
-    timeout=60,
-    max_retries=1,  # قلّل الانتظار لو حصل Rate Limit
-)
+genai.configure(api_key=GOOGLE_API_KEY)
 
 # (اختياري) Debug بسيط علشان تتأكد إنه شغّال بمفتاح API مش بمشروع GCP
 print("Using API key only? ->", bool(GOOGLE_API_KEY) and not any(
@@ -40,39 +35,37 @@ print("Using API key only? ->", bool(GOOGLE_API_KEY) and not any(
     ]
 ))
 
-
-def _build_memory() -> CombinedMemory:
-    """Create a combined memory using LangChain built-ins."""
-    if llm is None:
-        raise ValueError("LLM not initialized; GEMINI_API_KEY is required.")
-    
-    # Use unique keys to avoid CombinedMemory collisions; we'll map back to
-    # the legacy keys (history/entities) in the facade.
-    summary = ConversationSummaryMemory(
-        llm=llm,
-        memory_key="summary_history",
-        input_key="input",
-        output_key="output",
-        return_messages=False
-    )
-    entity = ConversationEntityMemory(
-        llm=llm,
-        memory_key="entities",
-        input_key="input",
-        output_key="output",
-        # Separate chat history key to avoid internal collisions
-        chat_history_key="entity_history"
-    )
-    return CombinedMemory(memories=[summary, entity])
-
-
-_session_memories: Dict[str, CombinedMemory] = {}
+# Session-based chat storage using Gemini's built-in chat state
+_session_chats: Dict[str, genai.ChatSession] = {}
 
 # --- Redis-backed persistence (optional) ---
 _HISTORY_KEY = "mem:{sid}:history"
 _SUMMARY_KEY = "mem:{sid}:summary"
 _ENTITIES_KEY = "mem:{sid}:entities"
 
+# def _build_memory() -> CombinedMemory:
+#     """Create a combined memory using LangChain built-ins."""
+#     if llm is None:
+#         raise ValueError("LLM not initialized; GEMINI_API_KEY is required.")
+#     
+#     # Use unique keys to avoid CombinedMemory collisions; we'll map back to
+#     # the legacy keys (history/entities) in the facade.
+#     summary = ConversationSummaryMemory(
+#         llm=llm,
+#         memory_key="summary_history",
+#         input_key="input",
+#         output_key="output",
+#         return_messages=False
+#     )
+#     entity = ConversationEntityMemory(
+#         llm=llm,
+#         memory_key="entities",
+#         input_key="input",
+#         output_key="output",
+#         # Separate chat history key to avoid internal collisions
+#         chat_history_key="entity_history"
+#     )
+#     return CombinedMemory(memories=[summary, entity])
 
 def _redis_keys(session_id: str) -> Tuple[str, str, str]:
     return (
@@ -80,7 +73,6 @@ def _redis_keys(session_id: str) -> Tuple[str, str, str]:
         _SUMMARY_KEY.format(sid=session_id),
         _ENTITIES_KEY.format(sid=session_id),
     )
-
 
 def _load_snapshot_from_redis(session_id: str) -> Tuple[Optional[str], Optional[dict], List[Tuple[str, str]]]:
     r = get_redis()
@@ -106,7 +98,6 @@ def _load_snapshot_from_redis(session_id: str) -> Tuple[Optional[str], Optional[
     except Exception:
         return None, None, []
 
-
 def _persist_to_redis(session_id: str, input_text: str, output_text: str, summary: Optional[str], entities: Optional[dict]) -> None:
     r = get_redis()
     if not r:
@@ -125,7 +116,6 @@ def _persist_to_redis(session_id: str, input_text: str, output_text: str, summar
     except Exception:
         pass
 
-
 def _clear_redis(session_id: Optional[str] = None) -> None:
     r = get_redis()
     if not r:
@@ -139,37 +129,56 @@ def _clear_redis(session_id: Optional[str] = None) -> None:
     except Exception:
         pass
 
-
-def get_memory(session_id: str) -> CombinedMemory:
-    """Return the memory instance for the given session id."""
+def get_chat_session(session_id: str) -> genai.ChatSession:
+    """Return the chat session for the given session id."""
     if session_id is None:
         session_id = str(uuid.uuid4())  # Generate a default if None
-    if session_id not in _session_memories:
-        mem = _build_memory()
-        # Seed from Redis snapshot by replaying history if present
-        _summary, _entities, history = _load_snapshot_from_redis(session_id)
-        if history:
-            for inp, out in history[-20:]:
-                try:
-                    mem.save_context({"input": inp}, {"output": out})
-                except Exception:
-                    break
-        _session_memories[session_id] = mem
-    return _session_memories[session_id]
+    
+    if session_id not in _session_chats:
+        # Create new Gemini model and chat session
+        model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
+        chat = model.start_chat(history=[])
+        _session_chats[session_id] = chat
+        
+        # Load history from Redis if available (optional)
+        # _summary, _entities, history = _load_snapshot_from_redis(session_id)
+        # if history:
+        #     # Note: Gemini chat sessions don't support loading history directly
+        #     # We'll rely on the built-in memory instead
+        #     pass
+    
+    return _session_chats[session_id]
+
+# def get_memory(session_id: str) -> CombinedMemory:
+#     """Return the memory instance for the given session id."""
+#     if session_id is None:
+#         session_id = str(uuid.uuid4())  # Generate a default if None
+#     if session_id not in _session_memories:
+#         mem = _build_memory()
+#         # Seed from Redis snapshot by replaying history if present
+#         _summary, _entities, history = _load_snapshot_from_redis(session_id)
+#         if history:
+#             for inp, out in history[-20:]:
+#                 try:
+#                     mem.save_context({"input": inp}, {"output": out})
+#                 except Exception:
+#                     break
+#         _session_memories[session_id] = mem
+#     return _session_memories[session_id]
 
 class _MemoryFacade:
     """Facade that supports both object-style and callable-style usage.
 
     - Object-style: memory_manager.load_memory_variables(...), .save_context(...)
       operates on a global default session id "global".
-    - Callable-style: memory_manager(session_id) -> CombinedMemory
+    - Callable-style: memory_manager(session_id) -> ChatSession
     """
 
     def __init__(self) -> None:
         self._default_session_id = "global"
 
-    def __call__(self, session_id: str | None) -> CombinedMemory:
-        return get_memory(session_id or self._default_session_id)
+    def __call__(self, session_id: str | None) -> genai.ChatSession:
+        return get_chat_session(session_id or self._default_session_id)
 
     # Proxy common memory API to the default session
     def load_memory_variables(self, inputs: dict) -> dict:
@@ -177,38 +186,41 @@ class _MemoryFacade:
         session_id = None
         if isinstance(inputs, dict):
             session_id = inputs.pop("session_id", None)
-        raw = self(session_id or self._default_session_id).load_memory_variables(inputs)
-        # Map internal keys back to expected legacy keys
-        mapped = {}
-        if "summary_history" in raw:
-            mapped["history"] = raw.get("summary_history", "")
-        if "entities" in raw:
-            mapped["entities"] = raw.get("entities", {})
-        # Preserve any other keys as-is
-        for k, v in raw.items():
-            if k not in ("summary_history", "entities"):
-                mapped[k] = v
-        return mapped
+        
+        # Get chat session
+        chat = self(session_id or self._default_session_id)
+        
+        # Return empty memory variables for compatibility
+        # (Gemini chat sessions handle memory internally)
+        return {
+            "history": "",  # Gemini handles this internally
+            "entities": {}   # Gemini handles this internally
+        }
 
     def save_context(self, inputs: dict, outputs: dict) -> None:
         # Route to specific session if provided
         session_id = None
         if isinstance(inputs, dict):
             session_id = inputs.pop("session_id", None)
-        mem = self(session_id or self._default_session_id)
-        mem.save_context(inputs, outputs)
-        # Persist to Redis (best-effort, non-blocking)
+        
+        # Get chat session
+        chat = self(session_id or self._default_session_id)
+        
+        # Send message to chat session (this automatically saves to memory)
         try:
-            raw = mem.load_memory_variables({"input": inputs.get("input", "")})
-            summary = raw.get("summary_history") or raw.get("history")
-            entities = raw.get("entities")
-            _persist_to_redis(session_id or self._default_session_id,
-                              inputs.get("input", ""),
-                              outputs.get("output", ""),
-                              summary,
-                              entities)
-        except Exception:
-            pass
+            user_message = inputs.get("input", "")
+            if user_message:
+                response = chat.send_message(user_message)
+                # The response is automatically stored in chat history
+                
+                # Optional: Persist to Redis for backup
+                # _persist_to_redis(session_id or self._default_session_id,
+                #                   user_message,
+                #                   response.text if response.text else "",
+                #                   None,  # No summary needed
+                #                   None)  # No entities needed
+        except Exception as e:
+            print(f"Error saving context to chat session: {e}")
 
     def clear(self) -> None:
         reset_memory(self._default_session_id)
@@ -218,10 +230,8 @@ class _MemoryFacade:
         # Intentionally a no-op for backward compatibility
         pass
 
-
 # Export facade instance under the expected name
 memory_manager = _MemoryFacade()
-
 
 def reset_memory(session_id: str | None = None) -> None:
     """Reset memory for a specific session or all sessions.
@@ -230,17 +240,18 @@ def reset_memory(session_id: str | None = None) -> None:
     - If None, clear all sessions.
     """
     if session_id is None:
-        _session_memories.clear()
+        _session_chats.clear()
         # Do not global-delete Redis content from here
         return
-    _session_memories.pop(session_id, None)
+    _session_chats.pop(session_id, None)
     _clear_redis(session_id)
-    _session_memories[session_id] = _build_memory()
-
+    # Create new chat session
+    model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
+    chat = model.start_chat(history=[])
+    _session_chats[session_id] = chat
 
 def clear_memory(session_id: str) -> None:
     """Alias to reset a specific session's memory."""
     reset_memory(session_id)
 
-
-__all__ = ["get_memory", "memory_manager", "reset_memory", "clear_memory"]
+__all__ = ["get_chat_session", "memory_manager", "reset_memory", "clear_memory"]
