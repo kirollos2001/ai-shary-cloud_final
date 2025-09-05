@@ -129,14 +129,49 @@ def _clear_redis(session_id: Optional[str] = None) -> None:
     except Exception:
         pass
 
+def _build_gemini_tools_list():
+    """Build tools list for Gemini function calling from config tool declarations.
+
+    Returns a list in the format expected by the SDK:
+    [{"function_declarations": [ ... ]}]
+    """
+    try:
+        import config  # Local import to avoid heavy globals and circular deps
+        tool_names = [
+            "schedule_viewing_tool",
+            "create_lead_tool",
+            "property_search_tool",
+            "search_new_launches_tool",
+            "get_unit_details_tool",
+            "insight_search_tool",
+            "get_more_units_tool",
+        ]
+        function_declarations = []
+        for name in tool_names:
+            tool_decl = getattr(config, name, None)
+            if isinstance(tool_decl, dict) and tool_decl.get("name"):
+                function_declarations.append(tool_decl)
+
+        if function_declarations:
+            return [{"function_declarations": function_declarations}]
+    except Exception as e:
+        # Non-fatal: fall back to no-tools if anything goes wrong
+        print(f"Warning: could not build Gemini tools list: {e}")
+    return None
+
+
 def get_chat_session(session_id: str) -> genai.ChatSession:
     """Return the chat session for the given session id."""
     if session_id is None:
         session_id = str(uuid.uuid4())  # Generate a default if None
     
     if session_id not in _session_chats:
-        # Create new Gemini model and chat session
-        model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
+        # Create new Gemini model and chat session with tool declarations
+        tools = _build_gemini_tools_list()
+        if tools:
+            model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME, tools=tools)
+        else:
+            model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
         chat = model.start_chat(history=[])
         _session_chats[session_id] = chat
         
@@ -245,8 +280,12 @@ def reset_memory(session_id: str | None = None) -> None:
         return
     _session_chats.pop(session_id, None)
     _clear_redis(session_id)
-    # Create new chat session
-    model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
+    # Create new chat session (preserve tools)
+    tools = _build_gemini_tools_list()
+    if tools:
+        model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME, tools=tools)
+    else:
+        model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
     chat = model.start_chat(history=[])
     _session_chats[session_id] = chat
 
