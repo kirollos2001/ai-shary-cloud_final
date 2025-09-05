@@ -313,14 +313,14 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         system_prompt = f"{config.assistant_instructions}\n\n### Examples:\n{config.examples}"
         full_prompt = f"{system_prompt}\n\n{context_prompt}\n\n### رسالة المستخدم:\n{user_message}"
         
-        # Get chat session for this session_id
+        # Get chat session for this session_id (pre-configured with tools)
         chat = memory_manager(session_id)
         
         # Send message to chat session (this automatically handles memory)
         logging.info(f"Generating response for user message: {user_message[:100]}...")
         response = chat.send_message(full_prompt)
         
-        # Check if response contains function calls
+        # Check if response contains native function calls (Gemini tool calling)
         if hasattr(response, 'candidates') and response.candidates:
             candidate = response.candidates[0]
             if hasattr(candidate, 'content') and candidate.content:
@@ -406,6 +406,7 @@ async def process_gemini_response_async(model, user_message, session_id=None):
                                 except Exception as _e:
                                     logging.warning(f"Could not augment insight_search with context: {_e}")
 
+                            # Execute tool function with parsed args
                             output = function_to_call(function_args)
                             logging.info(f"✅ Function {function_name} executed successfully!")
                             
@@ -427,7 +428,8 @@ async def process_gemini_response_async(model, user_message, session_id=None):
         # If no function call, get the text response
         response_text = response.text if response.text else "❌ لم يتم استلام رد من المساعد."
         
-        # Try to parse function calls from text response
+        # Fallback: Try to parse function calls from text response
+        # Note: We prefer native tool-calling; this is a safety net only
         function_result = parse_function_call_from_text(response_text)
         if function_result:
             logging.info(f"🔧 Function call parsed from text: {function_result.get('function_name')}")
