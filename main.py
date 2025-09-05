@@ -545,6 +545,43 @@ def chat():
                 bot_response = msg if msg else f"✅ تم تنفيذ {function_name} بنجاح."
 
             elif function_name == 'schedule_viewing':
+                msg = function_output.get('message', '')
+                bot_response = msg if msg else f"✅ تم حجز موعد المعاينة بنجاح!"
+            
+            elif function_name == 'get_current_datetime':
+                # Let LLM infer exact desired date/time using the current datetime
+                try:
+                    inferred = functions.infer_meeting_details_via_llm(user_message, function_output)
+                    desired_date = inferred.get('desired_date')
+                    desired_time = inferred.get('desired_time')
+                    meeting_type = inferred.get('meeting_type') or 'zoom'
+                    if desired_date and desired_time:
+                        sched_args = {
+                            'conversation_id': thread_id,
+                            'desired_date': desired_date,
+                            'desired_time': desired_time,
+                            'meeting_type': meeting_type,
+                        }
+                        try:
+                            from session_store import get_session as _get_session
+                            _ci = (_get_session(thread_id) or {})
+                            if _ci:
+                                sched_args.update({
+                                    'client_id': _ci.get('user_id', 1),
+                                    'name': _ci.get('name', 'Unknown'),
+                                    'phone': _ci.get('phone', 'Not Provided'),
+                                    'email': _ci.get('email', 'Not Provided'),
+                                })
+                        except Exception:
+                            pass
+                        out = functions.schedule_viewing(sched_args)
+                        bot_response = out.get('message', 'تم حجز الموعد بنجاح!')
+                    else:
+                        # Fallback to informative message from datetime tool
+                        bot_response = function_output.get('message') or 'تم حساب التاريخ.'
+                except Exception as _e:
+                    logging.warning(f'Auto-chain scheduling after get_current_datetime failed: {_e}')
+                    bot_response = function_output.get('message') or 'تم حساب التاريخ.'
                 bot_response = function_output.get('message', '✅ تم حجز الموعد بنجاح!')
 
             elif function_name == 'insight_search':
