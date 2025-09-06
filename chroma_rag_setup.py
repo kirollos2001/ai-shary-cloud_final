@@ -129,13 +129,23 @@ class RealEstateRAG:
             self.units_collection = self.client.create_collection(
                 name="real_estate_units",
                 metadata={"description": "Real estate units data for RAG with 3072-dim embeddings"},
-                embedding_function=self.embedder
+                embedding_function=self.embedder,
+                            # Add HNSW configuration to prevent the error
+            hnsw_config={
+                "M": 64,
+                "ef_construction": 200
+            }
             )
     
             self.new_launches_collection = self.client.create_collection(
                 name="new_launches",
                 metadata={"description": "New property launches data for RAG with 3072-dim embeddings"},
-                embedding_function=self.embedder
+                embedding_function=self.embedder,
+                            # Add HNSW configuration to prevent the error
+            hnsw_config={
+                "M": 64,
+                "ef_construction": 200
+            }
             )
     
             logger.info("Fresh collections created with 3072-dimensional embeddings")
@@ -357,13 +367,23 @@ Address: {city_name}
             self.units_collection = self.client.create_collection(
                 name="real_estate_units",
                 metadata={"description": "Real estate units data for RAG"},
-                embedding_function=self.embedder
+                embedding_function=self.embedder,
+                            # Add HNSW configuration to prevent the error
+            hnsw_config={
+                "M": 64,
+                "ef_construction": 200
+            }
             )
             
             self.new_launches_collection = self.client.create_collection(
                 name="new_launches",
                 metadata={"description": "New property launches data for RAG"},
-                embedding_function=self.embedder
+                embedding_function=self.embedder,
+                            # Add HNSW configuration to prevent the error
+            hnsw_config={
+                "M": 64,
+                "ef_construction": 200
+            }
             )
             
             logger.info("✅ Collections reset successfully")
@@ -468,7 +488,7 @@ Address: {city_name}
                         query_texts=[query],
                         n_results=fetch_k,
                         where=where_clauses[0],
-                        include=['embeddings', 'metadatas', 'distances', 'documents']
+                        include=['embeddings', 'metadatas', 'distances', 'documents'],
                     )
                 else:
                     # Multiple conditions - use $and
@@ -476,14 +496,14 @@ Address: {city_name}
                         query_texts=[query],
                         n_results=fetch_k,
                         where={"$and": where_clauses},
-                        include=['embeddings', 'metadatas', 'distances', 'documents']
+                        include=['embeddings', 'metadatas', 'distances', 'documents'],
                     )
             else:
                 # No where clause filters
                 results = self.units_collection.query(
                     query_texts=[query],
                     n_results=fetch_k,
-                    include=['embeddings', 'metadatas', 'distances', 'documents']
+                    include=['embeddings', 'metadatas', 'distances', 'documents'],
                 )
             
             # Check timeout before MMR processing
