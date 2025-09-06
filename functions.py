@@ -13,6 +13,7 @@ import variables
 import time
 
 from variables import EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, TEAM_EMAIL
+from session_store import get_session
 
 
 
@@ -83,7 +84,68 @@ def send_email(to_email, subject, body):
     except Exception as e:
         logging.error(f"❌ Failed to send email: {e}")
         return False
-from session_store import get_session
+
+def get_current_datetime(arguments=None):
+    """Return the current date and time in ISO format."""
+    now = datetime.now().isoformat()
+    return {
+        "current_datetime": now,
+        "message": f"التاريخ والوقت الحاليان: {now}",
+    }
+
+
+def infer_meeting_details_via_llm(user_message, datetime_info):
+    """Use Gemini to infer meeting details from a user message.
+
+    Args:
+        user_message (str): Original user request.
+        datetime_info (dict): Output from ``get_current_datetime`` containing
+            the current date and time.
+
+    Returns:
+        dict: ``{"desired_date": str | None, "desired_time": str | None, "meeting_type": str | None}``
+    """
+    try:
+        api_key = os.environ.get('GEMINI_API_KEY')
+        if not api_key:
+            logging.error("GEMINI_API_KEY is not set")
+            return {}
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(variables.GEMINI_MODEL_NAME)
+
+        current_dt = datetime_info.get('current_datetime')
+        prompt = (
+            "أنت مساعد ذكي تستخرج تفاصيل موعد من رسالة العميل.\n"
+            f"التاريخ والوقت الحاليان: {current_dt}\n"
+            f"رسالة العميل: {user_message}\n\n"
+            "أعد المعلومات بصيغة JSON بالمفاتيح: \n"
+            "desired_date (YYYY-MM-DD), desired_time (HH:MM بنظام 24 ساعة), meeting_type (zoom أو visit)."
+        )
+
+        response = model.generate_content(prompt)
+        text = response.text.strip() if response and response.text else "{}"
+
+        if text.startswith("```"):
+            lines = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
+            if lines and lines[0].strip().lower() == "json":
+                lines = lines[1:]
+            text = "\n".join(lines).strip()
+
+        try:
+            data = json.loads(text)
+        except Exception:
+            logging.warning(f"Could not parse LLM output as JSON: {text}")
+            return {}
+
+        return {
+            "desired_date": data.get("desired_date"),
+            "desired_time": data.get("desired_time"),
+            "meeting_type": data.get("meeting_type"),
+        }
+    except Exception as e:
+        logging.error(f"Failed to infer meeting details: {e}")
+        return {}
 
 def schedule_viewing(arguments):
     logging.info(f"Received arguments: {arguments}")
