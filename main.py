@@ -24,7 +24,7 @@ import asyncio
 import atexit
 import time
 from concurrent.futures import ThreadPoolExecutor
-
+from speech_utils import transcribe_audio
 from flask import Flask, render_template, request, jsonify, make_response
 import google.generativeai as genai
 from google.generativeai import types
@@ -48,6 +48,7 @@ from config import (
     configure_gemini,
 )
 
+
 # -------------------------------------------------------
 # Optional local .env loader (ignored on Cloud Run)
 # -------------------------------------------------------
@@ -59,6 +60,21 @@ try:
                 os.environ[key] = value
 except FileNotFoundError:
     pass
+
+# -------------------------------------------------------
+# Set Google Cloud environment variables if not already set
+# -------------------------------------------------------
+if not os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = r"C:\Users\kirollos\Downloads\new clean\sharyai-main\shary_ai_agent_cred.json"
+    logging.info("✅ Set GOOGLE_APPLICATION_CREDENTIALS from code")
+
+if not os.environ.get('GOOGLE_CLOUD_PROJECT'):
+    os.environ['GOOGLE_CLOUD_PROJECT'] = 'shary-ai-agent'
+    logging.info("✅ Set GOOGLE_CLOUD_PROJECT from code")
+
+if not os.environ.get('SPEECH_LANGUAGE'):
+    os.environ['SPEECH_LANGUAGE'] = 'ar-EG'
+    logging.info("✅ Set SPEECH_LANGUAGE from code")
 
 # -------------------------------------------------------
 # Logging
@@ -159,6 +175,84 @@ def start_conversation():
     logging.info(f"New session created with ID: {session_id}")
     config.client_sessions[session_id] = client_info
     return jsonify({"thread_id": session_id})
+    
+@app.route("/chat/audio", methods=["POST"])
+def chat_audio():
+    """Transcribe uploaded audio and return the transcript."""
+    try:
+        thread_id = request.form.get("thread_id")
+        if not thread_id:
+            logging.warning("No thread_id provided in /chat/audio request.")
+            return jsonify({"error": "thread_id is required"}), 400
+
+        audio_file = request.files.get("audio")
+        if not audio_file:
+            logging.warning("No audio file provided in /chat/audio request.")
+            return jsonify({"error": "audio file is required"}), 400
+
+        audio_bytes = audio_file.read()
+        logging.info(f"Received audio file for transcription: {audio_file.filename}, size={len(audio_bytes)} bytes, mime_type: {audio_file.mimetype}")
+
+        # Check for empty or very small audio files (likely silence or empty recording)
+        if len(audio_bytes) < 1000:  # Less than 1KB is likely empty/silent
+            logging.info("Audio file too small, likely empty or silent - ignoring gracefully")
+            return jsonify({"transcript": "", "thread_id": thread_id, "empty_audio": True})
+
+        # Check environment variables
+        logging.info(f"Environment check - GOOGLE_APPLICATION_CREDENTIALS: {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'NOT SET')}")
+        logging.info(f"Environment check - GOOGLE_CLOUD_PROJECT: {os.environ.get('GOOGLE_CLOUD_PROJECT', 'NOT SET')}")
+        logging.info(f"Environment check - SPEECH_LANGUAGE: {os.environ.get('SPEECH_LANGUAGE', 'NOT SET')}")
+
+        # Proactive dependency and credentials checks for clearer errors
+        try:
+            from google.cloud import speech_v2 as _speech_v2  # noqa: F401
+        except Exception:
+            logging.error("Google Cloud Speech-to-Text library not installed.")
+            return (
+                jsonify({
+                    "error": "Speech-to-Text dependency missing",
+                    "detail": "google-cloud-speech is not installed",
+                    "action": "pip install google-cloud-speech",
+                }),
+                501,
+            )
+
+        creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if not creds_path or not os.path.exists(creds_path):
+            logging.error("GOOGLE_APPLICATION_CREDENTIALS not set or file not found")
+            return (
+                jsonify({
+                    "error": "Missing Google credentials",
+                    "detail": "Set GOOGLE_APPLICATION_CREDENTIALS to a valid service account JSON path",
+                }),
+                500,
+            )
+
+        if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+            logging.error("GOOGLE_CLOUD_PROJECT is not configured")
+            return (
+                jsonify({
+                    "error": "Missing configuration",
+                    "detail": "Set GOOGLE_CLOUD_PROJECT environment variable",
+                }),
+                500,
+            )
+
+        transcript = transcribe_audio(audio_bytes, audio_file.mimetype)
+        logging.info(f"Transcription result: '{transcript}'")
+
+        # Handle empty transcript gracefully (like ChatGPT)
+        if not transcript or transcript.strip() == "":
+            logging.info("Transcription returned empty result - treating as empty audio")
+            return jsonify({"transcript": "", "thread_id": thread_id, "empty_audio": True})
+
+        return jsonify({"transcript": transcript, "thread_id": thread_id})
+        
+    except Exception as e:
+        logging.error(f"Error in chat_audio endpoint: {e}")
+        import traceback
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
 
 @app.route("/chat", methods=["GET", "POST"])
 def chat():
@@ -333,7 +427,7 @@ def chat():
                     cached_leads = _load_cache("leads_cache.json") or []
                     last_lead = next((l for l in cached_leads if str(l.get("user_id")) == str(user_id)), None)
                     if last_lead:
-                        for k in ["budget", "location", "property_type", "bedrooms", "bathrooms"]:
+                        for k in ["budget", "location", "property_type", "bedrooms"]:
                             if not merged_prefs.get(k) and last_lead.get(k):
                                 merged_prefs[k] = last_lead.get(k)
                 except Exception:
@@ -456,7 +550,6 @@ def chat():
                         "budget": merged_prefs.get("budget", 0),
                         "property_type": merged_prefs.get("property_type", ""),
                         "bedrooms": merged_prefs.get("bedrooms", 0),
-                        "bathrooms": merged_prefs.get("bathrooms", 0),
                         "compound": merged_prefs.get("compound_name", "")
                     }
                     function_output = functions.property_search(search_args)
@@ -473,7 +566,6 @@ def chat():
                                         f"{line.get('name_ar', line.get('name_en','N/A'))} | "
                                         f"Price: {line.get('price', 'N/A')} | "
                                         f"Rooms: {line.get('Bedrooms', line.get('bedrooms','N/A'))} | "
-                                        f"Baths: {line.get('Bathrooms', line.get('bathrooms','N/A'))}\n"
                                     )
                             message = function_output.get('message', '')
                             follow_up = function_output.get('follow_up', '')
@@ -523,7 +615,6 @@ def chat():
                                 f"{line.get('name_ar', line.get('name_en','غير متوفر'))} | "
                                 f"السعر: {line.get('price', 'غير متوفر')} | "
                                 f"غرف: {line.get('Bedrooms', line.get('bedrooms','غير متوفر'))} | "
-                                f"حمام: {line.get('Bathrooms', line.get('bathrooms','غير متوفر'))}\n"
                             )
                     message = function_output.get('message', '')
                     follow_up = function_output.get('follow_up', '')
@@ -582,7 +673,6 @@ def chat():
                 except Exception as _e:
                     logging.warning(f'Auto-chain scheduling after get_current_datetime failed: {_e}')
                     bot_response = function_output.get('message') or 'تم حساب التاريخ.'
-                bot_response = function_output.get('message', '✅ تم حجز الموعد بنجاح!')
 
             elif function_name == 'insight_search':
                 message = function_output.get('message', '')
@@ -603,7 +693,6 @@ def chat():
                                 f"{line.get('name_ar', line.get('name_en','غير متوفر'))} | "
                                 f"السعر: {line.get('price', 'غير متوفر')} | "
                                 f"غرف: {line.get('Bedrooms', line.get('bedrooms','غير متوفر'))} | "
-                                f"حمام: {line.get('Bathrooms', line.get('bathrooms','غير متوفر'))}\n"
                             )
                     message = function_output.get('message', '')
                     follow_up = function_output.get('follow_up', '')
@@ -629,7 +718,7 @@ def chat():
                     cached_leads = _load_cache("leads_cache.json") or []
                     last_lead = next((l for l in cached_leads if str(l.get("user_id")) == str(user_id)), None)
                     if last_lead:
-                        for k in ["budget", "location", "property_type", "bedrooms", "bathrooms"]:
+                        for k in ["budget", "location", "property_type", "bedrooms"]:
                             if not merged_prefs.get(k) and last_lead.get(k):
                                 merged_prefs[k] = last_lead.get(k)
                 except Exception:
@@ -701,7 +790,6 @@ def chat():
                         "budget": merged_prefs.get("budget", 0),
                         "property_type": merged_prefs.get("property_type"),
                         "bedrooms": merged_prefs.get("bedrooms", 0),
-                        "bathrooms": merged_prefs.get("bathrooms", 0),
                         "compound": merged_prefs.get("compound_name", "")
                     }
                     function_output = functions.property_search(search_args)
