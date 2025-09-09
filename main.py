@@ -541,18 +541,36 @@ def chat():
                 has_location = bool(merged_prefs.get("location"))
                 has_budget = merged_prefs.get("budget", 0) > 0
                 has_property_type = bool(merged_prefs.get("property_type"))
+                has_area = merged_prefs.get("apartment_area", 0) > 0
+                has_installments = merged_prefs.get("installment_years", 0) > 0
+                has_area = merged_prefs.get("apartment_area", 0) > 0
+                has_installments = merged_prefs.get("installment_years", 0) > 0
+                logging.info(f"Auto-trigger (error fallback, extended) ? area:{has_area} inst:{has_installments}")
                 logging.info(f"Auto-trigger (error fallback) — loc:{has_location} budget:{has_budget} type:{has_property_type}")
 
-                # Relax: trigger if at least two core signals are present
-                if (has_budget and has_property_type) or (has_budget and has_location) or (has_property_type and has_location):
+                # Only trigger search when core signals + area + installments are ready
+                core_ready = has_location and has_budget and has_property_type
+                if core_ready and has_area and has_installments:
                     search_args = {
                         "location": merged_prefs.get("location", ""),
                         "budget": merged_prefs.get("budget", 0),
                         "property_type": merged_prefs.get("property_type", ""),
                         "bedrooms": merged_prefs.get("bedrooms", 0),
-                        "compound": merged_prefs.get("compound_name", "")
+                        "compound": merged_prefs.get("compound_name", ""),
+                        "apartment_area": merged_prefs.get("apartment_area", 0),
+                        "installment_years": merged_prefs.get("installment_years", 0),
                     }
                     function_output = functions.property_search(search_args)
+                elif core_ready and (not has_area or not has_installments):
+                    # Ask for missing info instead of searching prematurely
+                    missing_parts = []
+                    if not has_area:
+                        missing_parts.append("المساحة بالمتر؟")
+                    if not has_installments:
+                        missing_parts.append("التقسيط على كام سنة؟")
+                    ask = " و ".join(missing_parts)
+                    bot_response = f"تمام! قبل ما أدور لك بدقة، محتاج أعرف: {ask}"
+                    auto_triggered = True
                     if function_output:
                         if function_output.get('results'):
                             results = function_output.get('results', [])
