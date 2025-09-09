@@ -13,6 +13,9 @@ langsmith==0.1.71
 google-generativeai==0.4.1
 langchain-google-genai==0.0.11
 
+# Google Cloud Speech-to-Text
+google-cloud-speech==2.26.0
+
 # DB & Vectors
 mysql-connector-python==9.0.0
 chromadb==0.4.24
@@ -30,9 +33,6 @@ python-dotenv==1.0.1
 aiohttp==3.9.5
 filelock==3.15.4
 
-
-
 # Scientific (Python 3.11)
 numpy==1.26.4
 pandas==2.3.1
-
