@@ -13,7 +13,7 @@ def cosine_similarity(vec1, vec2):
         return 0.0
     return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
 
-def mmr(query_embedding, doc_embeddings, k=10, lambda_param=0.9):
+def mmr(query_embedding, doc_embeddings, k=20, lambda_param=0.9):
     """
     Maximal Marginal Relevance (MMR) for result diversification.
     Args:
@@ -67,8 +67,8 @@ def combined_mmr_keyword_search(
     chroma_collection,
     keyword_search_fn: Callable[[str], List[Dict]],
     gemini_api_key: str,
-    k: int = 40,
-    fetch_k: int = 200,
+    k: int = 20,
+    fetch_k: int = 100,
     lambda_param: float = 0.9,
     price_filter: float = None
 ) -> List[Dict]:
@@ -193,8 +193,8 @@ def price_filtered_mmr_search(
     chroma_collection,
     gemini_api_key: str,
     target_price: float,
-    k: int = 40,
-    fetch_k: int = 200,
+    k: int = 20,
+    fetch_k: int = 100,
     lambda_param: float = 0.9
 ) -> List[Dict]:
     """
