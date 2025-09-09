@@ -16,7 +16,7 @@ class ChatbotRAGIntegration:
         self.rag = get_rag_instance()
         logger.info("✅ RAG integration initialized")
 
-    def search_properties(self, query: str, search_type: str = "all", n_results: int = 5, use_mmr: bool = True, fetch_k: int = 20) -> Dict[str, Any]:
+    def search_properties(self, query: str, search_type: str = "all", n_results: int = 5, use_mmr: bool = True, fetch_k: int = 100) -> Dict[str, Any]:
         """
         Search properties using RAG with optional MMR
         Args:
@@ -55,7 +55,7 @@ class ChatbotRAGIntegration:
                     return 0
                 return dot_product / (norm_embedding1 * norm_embedding2)
 
-            def maximal_marginal_relevance(query_embedding, docs, embeddings, k=3, lambda_param=0.5):
+            def maximal_marginal_relevance(query_embedding, docs, embeddings, k=20, lambda_param=0.5):
                 if k > len(docs):
                     k = len(docs)
                 selected_indices = []
@@ -361,7 +361,7 @@ def test_mmr_retrieval():
     print("\n--- MMR Retrieval Test ---")
     rag = ChatbotRAGIntegration()
     query = "شقة في القاهرة الجديدة"
-    result = rag.search_properties(query, search_type="units", n_results=5, use_mmr=True, fetch_k=20)
+    result = rag.search_properties(query, search_type="units", n_results=5, use_mmr=True, fetch_k=100)
     print(f"Query: {query}")
     print("Top 5 MMR-selected results:")
     for i, r in enumerate(result["results"], 1):
