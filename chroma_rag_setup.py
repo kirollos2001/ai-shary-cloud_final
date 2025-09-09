@@ -452,8 +452,8 @@ Address: {city_name}
                     where_clauses.append({'price_value': {'$lte': filters['price_max']}})
                 # Skip bedrooms/bathrooms for now as requested
                 pass  # No filters applied at ChromaDB level for now
-            # 1. Get candidates for MMR processing (RAG pipeline) - increased for better coverage
-            fetch_k = 200  # Increased from 100 to 200 for better coverage
+            # 1. Get candidates for MMR processing (RAG pipeline)
+            fetch_k = 100  # Set to 100 as requested
             
             # Use separate where clauses for ChromaDB compatibility
             if where_clauses:
@@ -505,7 +505,7 @@ Address: {city_name}
                     if embeddings is not None and len(embeddings) > 0:
                         # Apply MMR algorithm for optimal diversity - increased k for better coverage
                         from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=40, lambda_param=0.9)  # Increased from 20 to 40 for better coverage
+                        mmr_indices = mmr(query_embedding, embeddings, k=20, lambda_param=0.9)  # Set to 20 as requested
                         logger.info(f"✅ MMR selected {len(mmr_indices)} indices: {mmr_indices}")
                         
                         # Get MMR-optimized results
@@ -690,7 +690,11 @@ Address: {city_name}
             apartment_area = filters.get('apartment_area')
             installment_years = filters.get('installment_years')
             
-            if not apartment_area and not installment_years:
+            # Check if we have valid numeric values for filtering
+            has_area_filter = apartment_area is not None and apartment_area != 0 and isinstance(apartment_area, (int, float))
+            has_installment_filter = installment_years is not None and installment_years != 0 and isinstance(installment_years, (int, float))
+            
+            if not has_area_filter and not has_installment_filter:
                 return chroma_results
             
             logger.info(f"📊 Applying area/installment filtering pre-MMR on {len(chroma_results['documents'][0])} documents")
@@ -705,58 +709,82 @@ Address: {city_name}
         filtered_distances = []
         
         try:
+            start_time = time.time()
+            max_filtering_time = 3.0  # 3 seconds max for filtering
+            
+            total_docs = len(chroma_results['documents'][0])
             for i, doc in enumerate(chroma_results['documents'][0]):
+                # Check timeout during filtering
+                if time.time() - start_time > max_filtering_time:
+                    logger.warning(f"⚠️ Filtering timeout after {max_filtering_time}s, using original results")
+                    return chroma_results
+                
+                # Early exit if we have enough results and are past 50% of documents
+                if len(filtered_docs) >= 50 and i > total_docs * 0.5:
+                    logger.info(f"✅ Early exit: Found {len(filtered_docs)} results after checking {i}/{total_docs} documents")
+                    break
                 try:
-                    metadata = chroma_results['metadatas'][0][i] if chroma_results.get('metadatas') and chroma_results['metadatas'][0] else {}
+                    if chroma_results.get('metadatas') and chroma_results['metadatas'] and len(chroma_results['metadatas']) > 0 and chroma_results['metadatas'][0]:
+                        metadata = chroma_results['metadatas'][0][i]
+                    else:
+                        metadata = {}
                     include_result = True
                 except Exception as e:
                     logger.error(f"❌ Error accessing metadata for index {i}: {e}")
+                    import traceback
+                    logger.error(f"❌ Metadata access traceback: {traceback.format_exc()}")
                     continue
-            
-            # Apply apartment_area filtering with ±10% tolerance
-            if apartment_area and include_result:
-                try:
-                    unit_area = metadata.get('apartment_area', 0)
-                    unit_area = float(unit_area) if unit_area else 0
-                    if unit_area > 0:
-                        # Calculate tolerance: ±10%
-                        tolerance = float(apartment_area) * 0.1
-                        min_area = float(apartment_area) - tolerance
-                        max_area = float(apartment_area) + tolerance
-                        
-                        if not (min_area <= unit_area <= max_area):
-                            include_result = False
-                            logger.debug(f"❌ Area filter: {unit_area} not in range [{min_area}, {max_area}]")
-                except (ValueError, TypeError, Exception) as e:
-                    # If we can't parse the area, include the result
-                    logger.debug(f"⚠️ Area filter error for index {i}: {e}")
-                    pass
-            
-            # Apply installment_years filtering with ±2 years tolerance
-            if installment_years and include_result:
-                try:
-                    unit_installment = metadata.get('installment_years', 0)
-                    unit_installment = float(unit_installment) if unit_installment else 0
-                    if unit_installment > 0:
-                        # Calculate tolerance: ±2 years
-                        min_installment = float(installment_years) - 2
-                        max_installment = float(installment_years) + 2
-                        
-                        if not (min_installment <= unit_installment <= max_installment):
-                            include_result = False
-                            logger.debug(f"❌ Installment filter: {unit_installment} not in range [{min_installment}, {max_installment}]")
-                except (ValueError, TypeError, Exception) as e:
-                    # If we can't parse the installment, include the result
-                    logger.debug(f"⚠️ Installment filter error for index {i}: {e}")
-                    pass
-            
+                
+                # Apply apartment_area filtering with ±10% tolerance
+                if has_area_filter and include_result:
+                    try:
+                        unit_area = metadata.get('apartment_area', 0)
+                        # Handle array values
+                        if isinstance(unit_area, (list, tuple)):
+                            unit_area = unit_area[0] if unit_area else 0
+                        unit_area = float(unit_area) if unit_area else 0
+                        if unit_area > 0:
+                            # Calculate tolerance: ±10%
+                            tolerance = float(apartment_area) * 0.1
+                            min_area = float(apartment_area) - tolerance
+                            max_area = float(apartment_area) + tolerance
+                            
+                            if not (min_area <= unit_area <= max_area):
+                                include_result = False
+                                logger.debug(f"❌ Area filter: {unit_area} not in range [{min_area}, {max_area}]")
+                    except (ValueError, TypeError, Exception) as e:
+                        # If we can't parse the area, include the result
+                        logger.debug(f"⚠️ Area filter error for index {i}: {e}")
+                        pass
+                
+                # Apply installment_years filtering with ±2 years tolerance
+                if has_installment_filter and include_result:
+                    try:
+                        unit_installment = metadata.get('installment_years', 0)
+                        # Handle array values
+                        if isinstance(unit_installment, (list, tuple)):
+                            unit_installment = unit_installment[0] if unit_installment else 0
+                        unit_installment = float(unit_installment) if unit_installment else 0
+                        if unit_installment > 0:
+                            # Calculate tolerance: ±2 years
+                            min_installment = float(installment_years) - 2
+                            max_installment = float(installment_years) + 2
+                            
+                            if not (min_installment <= unit_installment <= max_installment):
+                                include_result = False
+                                logger.debug(f"❌ Installment filter: {unit_installment} not in range [{min_installment}, {max_installment}]")
+                    except (ValueError, TypeError, Exception) as e:
+                        # If we can't parse the installment, include the result
+                        logger.debug(f"⚠️ Installment filter error for index {i}: {e}")
+                        pass
+                
                 if include_result:
                     filtered_docs.append(doc)
-                    if chroma_results.get('metadatas') and chroma_results['metadatas'] and len(chroma_results['metadatas']) > 0 and chroma_results['metadatas'][0]:
+                    if chroma_results.get('metadatas') and chroma_results['metadatas'] and len(chroma_results['metadatas']) > 0 and len(chroma_results['metadatas'][0]) > 0:
                         filtered_metadatas.append(metadata)
-                    if chroma_results.get('embeddings') and chroma_results['embeddings'] and len(chroma_results['embeddings']) > 0 and chroma_results['embeddings'][0]:
+                    if chroma_results.get('embeddings') and chroma_results['embeddings'] and len(chroma_results['embeddings']) > 0 and len(chroma_results['embeddings'][0]) > 0:
                         filtered_embeddings.append(chroma_results['embeddings'][0][i])
-                    if chroma_results.get('distances') and chroma_results['distances'] and len(chroma_results['distances']) > 0 and chroma_results['distances'][0]:
+                    if chroma_results.get('distances') and chroma_results['distances'] and len(chroma_results['distances']) > 0 and len(chroma_results['distances'][0]) > 0:
                         filtered_distances.append(chroma_results['distances'][0][i])
             
             # Create filtered results dictionary
@@ -769,15 +797,17 @@ Address: {city_name}
             
             logger.info(f"✅ Pre-MMR filtering: {len(chroma_results['documents'][0])} -> {len(filtered_docs)} documents")
             
-            # Check if results after filtering are too few (≤30) - cancel filtering and use original results
-            if len(filtered_docs) <= 30:
-                logger.info(f"⚠️ Only {len(filtered_docs)} results after filtering (≤30), canceling area/installment filtering")
+            # Check if results after filtering are too few (≤10) - cancel filtering and use original results
+            if len(filtered_docs) <= 20:
+                logger.info(f"⚠️ Only {len(filtered_docs)} results after filtering (≤10), canceling area/installment filtering")
                 return chroma_results
             
             return filtered_results
             
         except Exception as e:
             logger.error(f"❌ Error in pre-MMR filtering loop: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             return chroma_results
 
     def _apply_area_installment_filtering(self, results: List[Dict], filters: Dict = None) -> List[Dict]:
@@ -863,8 +893,8 @@ Address: {city_name}
                 if 'location' in filters and filters['location']:
                     # Note: Location filtering would need to be done post-search since it's in the document text
                     pass
-            # 1. Get candidates for MMR processing (RAG pipeline) - reduced for performance
-            fetch_k = 100  # Reduced from 1000 to 100 for better performance
+            # 1. Get candidates for MMR processing (RAG pipeline)
+            fetch_k = 100  # Set to 100 as requested
             
             # Use separate where clauses for ChromaDB compatibility
             if where_clauses:
@@ -905,7 +935,7 @@ Address: {city_name}
                     if embeddings is not None and len(embeddings) > 0:
                         # Apply MMR algorithm for optimal diversity - reduced k for performance
                         from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=20, lambda_param=0.8)  # Reduced from 50 to 20 for better performance
+                        mmr_indices = mmr(query_embedding, embeddings, k=20, lambda_param=0.8)  # Set to 20 as requested
                         
                         # Get MMR-optimized results
                         mmr_results = []
