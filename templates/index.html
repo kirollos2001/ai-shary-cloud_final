@@ -382,6 +382,49 @@
             transform: translateY(-2px);
         }
 
+        .voice-wave {
+            display: none;
+            align-items: flex-end;
+            gap: 3px;
+            height: 24px;
+            padding: 0 4px;
+        }
+
+        .voice-wave span {
+            display: block;
+            width: 3px;
+            height: 4px;
+            background: var(--brand-blue);
+            animation: wave 1s infinite ease-in-out;
+        }
+
+        .voice-wave span:nth-child(2) {
+            animation-delay: 0.1s;
+        }
+
+        .voice-wave span:nth-child(3) {
+            animation-delay: 0.2s;
+        }
+
+        .voice-wave span:nth-child(4) {
+            animation-delay: 0.3s;
+        }
+
+        .voice-wave span:nth-child(5) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes wave {
+
+            0%,
+            100% {
+                height: 4px;
+            }
+
+            50% {
+                height: 16px;
+            }
+        }
 
         .welcome-message {
             text-align: center;
@@ -727,10 +770,21 @@
                 setTimeout(() => indicator.remove(), 300);
             }
         }
+        function showVoiceWave() {
+            const wave = document.getElementById('voiceWave');
+            if (wave) wave.style.display = 'flex';
+        }
+
+        function hideVoiceWave() {
+            const wave = document.getElementById('voiceWave');
+            if (wave) wave.style.display = 'none';
+        }
+
         // Audio recording helpers
         async function toggleRecording() {
             if (isRecording) {
                 mediaRecorder.stop();
+                hideVoiceWave();
                 return;
             }
             if (!navigator.mediaDevices) {
@@ -745,6 +799,7 @@
                 mediaRecorder.onstop = async () => {
                     isRecording = false;
                     updateMicButton();
+                    hideVoiceWave();
                     const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
                     const formData = new FormData();
                     formData.append('audio', audioBlob, 'recording.webm');
@@ -768,9 +823,11 @@
                 mediaRecorder.start();
                 isRecording = true;
                 updateMicButton();
+                showVoiceWave();
             } catch (err) {
                 console.error('Could not start recording', err);
                 alert('Microphone access denied');
+                hideVoiceWave();
             }
         }
 
@@ -922,6 +979,13 @@
                     <line x1="8" y1="23" x2="16" y2="23"></line>
                 </svg>
             </button>
+            <div id="voiceWave" class="voice-wave">
+                <span></span>
+                <span></span>
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
             <button class="send-button" onclick="sendMessage()">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M22 2L11 13M22 2L15 22L11 13L2 9L22 2Z" />
