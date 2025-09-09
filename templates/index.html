@@ -358,6 +358,31 @@
             transform: none;
         }
 
+        .mic-button {
+            padding: 16px;
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 2px solid var(--border-color);
+            border-radius: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 56px;
+            height: 56px;
+            transition: all 0.3s ease;
+        }
+
+        .mic-button.recording {
+            background: var(--brand-yellow);
+            color: #fff;
+        }
+
+        .mic-button:hover {
+            transform: translateY(-2px);
+        }
+
+
         .welcome-message {
             text-align: center;
             padding: 60px 20px;
@@ -568,6 +593,9 @@
     <script>
         let threadId = null;
         let isTyping = false;
+        let isRecording = false;
+        let mediaRecorder = null;
+        let audioChunks = [];
 
         // Theme management
         function initTheme() {
@@ -697,6 +725,62 @@
             if (indicator) {
                 indicator.style.opacity = '0';
                 setTimeout(() => indicator.remove(), 300);
+            }
+        }
+        // Audio recording helpers
+        async function toggleRecording() {
+            if (isRecording) {
+                mediaRecorder.stop();
+                return;
+            }
+            if (!navigator.mediaDevices) {
+                alert('🎤 Microphone not supported in this browser.');
+                return;
+            }
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+                mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+                mediaRecorder.onstop = async () => {
+                    isRecording = false;
+                    updateMicButton();
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    const formData = new FormData();
+                    formData.append('audio', audioBlob, 'recording.webm');
+                    formData.append('thread_id', threadId);
+                    try {
+                        const resp = await fetch('/chat/audio', { method: 'POST', body: formData });
+                        const data = await resp.json();
+                        if (data.transcript) {
+                            const input = document.getElementById('userInput');
+                            input.value = data.transcript;
+                            adjustTextareaHeight();
+                            input.focus();
+                        } else if (data.error) {
+                            alert(data.error);
+                        }
+                    } catch (err) {
+                        console.error('Audio upload failed', err);
+                        alert('Transcription failed');
+                    }
+                };
+                mediaRecorder.start();
+                isRecording = true;
+                updateMicButton();
+            } catch (err) {
+                console.error('Could not start recording', err);
+                alert('Microphone access denied');
+            }
+        }
+
+        function updateMicButton() {
+            const btn = document.querySelector('.mic-button');
+            if (!btn) return;
+            if (isRecording) {
+                btn.classList.add('recording');
+            } else {
+                btn.classList.remove('recording');
             }
         }
 
@@ -830,6 +914,14 @@
                 <textarea id="userInput" placeholder="Type your message here..." onkeypress="handleKeyPress(event)"
                     rows="1"></textarea>
             </div>
+            <button class="mic-button" onclick="toggleRecording()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 1a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                </svg>
+            </button>
             <button class="send-button" onclick="sendMessage()">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M22 2L11 13M22 2L15 22L11 13L2 9L22 2Z" />
