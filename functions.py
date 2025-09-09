@@ -283,6 +283,19 @@ def search_new_launches(arguments):
         property_type = str(arguments.get("property_type", "")).strip().lower()
         location = str(arguments.get("location", "")).strip().lower()
         compound = str(arguments.get("compound", "")).strip().lower()
+        
+        # Validate required parameters
+        if not property_type or property_type == "":
+            return {
+                "error": "نوع العقار مطلوب للبحث عن الإطلاقات الجديدة",
+                "message": "أهلاً بيك في مسار الإطلاقات الجديدة! 🚀\nتحب إيه نوع العقار؟ (شقة، فيلا، تجاري، طبي)"
+            }
+        
+        if not location or location == "":
+            return {
+                "error": "الموقع مطلوب للبحث عن الإطلاقات الجديدة", 
+                "message": "تمام! تحب في أي منطقة؟ (القاهرة الجديدة، العاصمة الإدارية، الشيخ زايد، الساحل الشمالي)"
+            }
 
         semantic_parts = []
         if property_type:
@@ -675,6 +688,7 @@ def property_search(arguments):
         bedrooms = arguments.get("bedrooms")
         bathrooms = arguments.get("bathrooms")
         apartment_area = arguments.get("apartment_area")
+        installment_years = arguments.get("installment_years")
         # Optional preferred compound (accept both 'compound' and 'compound_name')
         compound_name = (arguments.get("compound") or arguments.get("compound_name") or "").strip()
         
@@ -695,11 +709,26 @@ def property_search(arguments):
             missing_fields.append("نوع العقار")
 
         if missing_fields:
+            # Enhanced validation message that asks about area and installment years
+            additional_questions = []
+            if not apartment_area:
+                additional_questions.append("المساحة المطلوبة (مثل: 100 متر، 120 متر)")
+            if not installment_years:
+                additional_questions.append("نظام التقسيط المفضل (مثل: 5 سنوات، 10 سنوات)")
+            
+            message = "محتاج منك معلومات أساسية قبل ما أبدأ البحث: " + ", ".join(missing_fields) + ".\n"
+            message += "- مثال للميزانية: 4,000,000 أو 4 مليون\n"
+            message += "- ممكن كمان تقولّي كمبوند مفضل لو حابب (اختياري)\n"
+            
+            if additional_questions:
+                message += "\n🔍 أسئلة إضافية لنتائج أدق:\n"
+                for question in additional_questions:
+                    message += f"- {question}\n"
+                message += "\n💡 هذه المعلومات اختيارية لكنها تساعدني في إيجاد أفضل النتائج لك!"
+            
             return {
                 "source": "validation",
-                "message": "محتاج منك معلومات أساسية قبل ما أبدأ البحث: " + ", ".join(missing_fields) + ".\n" \
-                           + "- مثال للميزانية: 4,000,000 أو 4 مليون\n" \
-                           + "- ممكن كمان تقولّي كمبوند مفضل لو حابب (اختياري)",
+                "message": message,
                 "results": []
             }
         
@@ -744,6 +773,8 @@ def property_search(arguments):
             search_query_parts.append(f"{bathrooms} bathrooms")
         if apartment_area:
             search_query_parts.append(f"area around {apartment_area}")
+        if installment_years:
+            search_query_parts.append(f"installment {installment_years} years")
         
         # Create semantic search query
         search_query = " ".join(search_query_parts) if search_query_parts else "property units"
@@ -787,6 +818,10 @@ def property_search(arguments):
                 filters["query_property_type"] = property_type
             if compound_name:
                 filters["query_compound"] = compound_name
+            if apartment_area:
+                filters["apartment_area"] = apartment_area
+            if installment_years:
+                filters["installment_years"] = installment_years
             
             # Check timeout before search
             if time.time() - start_time > max_execution_time:
@@ -2144,7 +2179,7 @@ def intelligent_property_search_with_expansion(user_query, search_arguments, chr
         }
 
 
-def _perform_semantic_search(query_text, chroma_collection, embedder, filters, fetch_k=100):
+def _perform_semantic_search(query_text, chroma_collection, embedder, filters, fetch_k=200):
     """
     Perform semantic search with given filters
     """
@@ -2175,7 +2210,7 @@ def _perform_semantic_search(query_text, chroma_collection, embedder, filters, f
         
         # Apply MMR for diversity
         query_embedding = embedder.embed(query_text)
-        mmr_indices = mmr(query_embedding, embeddings, k=min(len(docs), 50), lambda_param=0.7)
+        mmr_indices = mmr(query_embedding, embeddings, k=min(len(docs), 40), lambda_param=0.7)
         
         results = []
         for i in mmr_indices:
