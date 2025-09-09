@@ -676,7 +676,7 @@ def property_search(arguments):
     """
     import time
     start_time = time.time()
-    max_execution_time = 10.0  # 15 seconds timeout (increased from 8)
+    max_execution_time = 8.0  # 8 seconds timeout for better performance
     
     try:
         # Mandatory fields
@@ -707,31 +707,54 @@ def property_search(arguments):
             missing_fields.append("الميزانية")
         if not property_type:
             missing_fields.append("نوع العقار")
+        
+        # Require area and installment years before searching
+        try:
+            _ = apartment_area
+        except NameError:
+            apartment_area = arguments.get("apartment_area")
+        try:
+            _ = installment_years
+        except NameError:
+            installment_years = arguments.get("installment_years")
+        if apartment_area in (None, "", 0):
+            missing_fields.append("المساحة (بالمتر)")
+        if installment_years in (None, "", 0):
+            missing_fields.append("سنين التقسيط")
 
+        # If any required info is missing, ask for area and installment years first
         if missing_fields:
-            # Enhanced validation message that asks about area and installment years
-            additional_questions = []
-            if not apartment_area:
-                additional_questions.append("المساحة المطلوبة (مثل: 100 متر، 120 متر)")
-            if not installment_years:
-                additional_questions.append("نظام التقسيط المفضل (مثل: 5 سنوات، 10 سنوات)")
-            
+            try:
+                need_area = "��꫟�� (���ꢩ)" in missing_fields or "المساحة (بالمتر)" in missing_fields
+                need_installments = "���� �����" in missing_fields or "سنين التقسيط" in missing_fields
+                ask_parts = []
+                if need_area:
+                    ask_parts.append("المساحة التقريبية بالمتر؟")
+                if need_installments:
+                    ask_parts.append("تحب التقسيط على كام سنة؟")
+                ask_phrase = " و ".join(ask_parts) if ask_parts else ""
+                prefix = "قبل ما أقدر أدور لك بدقة، محتاج أعرف: " if ask_phrase else "من فضلك كمل البيانات التالية: "
+                message_new = prefix + ask_phrase
+                others = [f for f in missing_fields if f not in ["��꫟�� (���ꢩ)", "���� �����", "المساحة (بالمتر)", "سنين التقسيط"]]
+                if others:
+                    message_new += ("\nناقص كمان: " + ", ".join(others))
+            except Exception:
+                message_new = "من فضلك اديني المساحة بالمتر وسنين التقسيط قبل ما نبدأ البحث."
+
+            return {
+                "source": "validation",
+                "message": message_new.strip(),
+                "results": []
+            }
+        if missing_fields:
             message = "محتاج منك معلومات أساسية قبل ما أبدأ البحث: " + ", ".join(missing_fields) + ".\n"
             message += "- مثال للميزانية: 4,000,000 أو 4 مليون\n"
-            message += "- ممكن كمان تقولّي كمبوند مفضل لو حابب (اختياري)\n"
-            
-            if additional_questions:
-                message += "\n🔍 أسئلة إضافية لنتائج أدق:\n"
-                for question in additional_questions:
-                    message += f"- {question}\n"
-                message += "\n💡 هذه المعلومات اختيارية لكنها تساعدني في إيجاد أفضل النتائج لك!"
             
             return {
                 "source": "validation",
                 "message": message,
                 "results": []
             }
-        
         # Check timeout
         if time.time() - start_time > max_execution_time:
             return {
@@ -831,6 +854,14 @@ def property_search(arguments):
                     "results": []
                 }
             
+            # Check timeout before search
+            if time.time() - start_time > max_execution_time:
+                return {
+                    "source": "timeout",
+                    "message": "عذراً، البحث استغرق وقت طويل. جرب تقليل نطاق البحث أو تحديث الصفحة.",
+                    "results": []
+                }
+            
             # Perform semantic search using ChromaDB with MMR - reduced n_results for performance
             initial_results = rag.search_units(search_query, n_results=20, filters=filters)  # Reduced from 50 to 20
             
@@ -907,6 +938,7 @@ def property_search(arguments):
             for item in diversified_results:
                 # Check timeout during filtering
                 if time.time() - start_time > max_execution_time:
+                    print(f"⚠️ Search timeout during filtering after {time.time() - start_time:.2f}s")
                     break
                     
                 # Exclude previously shown units for progressive search
@@ -926,6 +958,7 @@ def property_search(arguments):
             
             # Check timeout before formatting
             if time.time() - start_time > max_execution_time:
+                print(f"⚠️ Search timeout before formatting after {time.time() - start_time:.2f}s")
                 return {
                     "source": "timeout",
                     "message": "عذراً، البحث استغرق وقت طويل. جرب تقليل نطاق البحث أو تحديث الصفحة.",
@@ -2139,7 +2172,7 @@ def intelligent_property_search_with_expansion(user_query, search_arguments, chr
             chroma_collection, 
             embedder, 
             current_filters,
-            fetch_k=1000
+            fetch_k=100
         )
         
         print(f"📊 Initial results: {len(results)}")
@@ -2179,7 +2212,7 @@ def intelligent_property_search_with_expansion(user_query, search_arguments, chr
         }
 
 
-def _perform_semantic_search(query_text, chroma_collection, embedder, filters, fetch_k=200):
+def _perform_semantic_search(query_text, chroma_collection, embedder, filters, fetch_k=100):
     """
     Perform semantic search with given filters
     """
@@ -2210,7 +2243,7 @@ def _perform_semantic_search(query_text, chroma_collection, embedder, filters, f
         
         # Apply MMR for diversity
         query_embedding = embedder.embed(query_text)
-        mmr_indices = mmr(query_embedding, embeddings, k=min(len(docs), 40), lambda_param=0.7)
+        mmr_indices = mmr(query_embedding, embeddings, k=min(len(docs), 20), lambda_param=0.7)
         
         results = []
         for i in mmr_indices:
@@ -2311,7 +2344,7 @@ def _apply_expansion_policy(query_text, chroma_collection, embedder, numeric_fil
         chroma_collection, 
         embedder, 
         relaxed_filters,
-        fetch_k=200  # Increase fetch size
+        fetch_k=100  # Set to 100 as requested
     )
     
     print(f"📊 Results after expansion: {len(results)}")
