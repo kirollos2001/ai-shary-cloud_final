@@ -16,14 +16,64 @@ def parse_function_call_from_text(response_text):
     Returns: dict with function_output and function_name if found, None otherwise
     """
     try:
-        # Check for unit detail requests first (special case)
+        # Check for email/contact information first (higher priority)
+        email_contact_patterns = [
+            r'اسمي.*?(\w+.*?)\s+ورقمي.*?(\d+)',
+            r'اسمي.*?(\w+.*?)\s+والايميل.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+            r'اسمي.*?(\w+.*?)\s+ورقمي.*?(\d+).*?والايميل.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+            r'عايزه.*?يكون.*?بع',
+            r'ارسل.*?ايميل',
+            r'بعت.*?ايميل',
+            r'contact.*?me',
+            r'send.*?email'
+        ]
+        
+        for pattern in email_contact_patterns:
+            match = re.search(pattern, response_text, re.IGNORECASE)
+            if match:
+                logging.info(f"🔧 Detected email/contact request")
+                
+                try:
+                    function_to_call = getattr(functions, 'send_email')
+                    # Extract contact info from the message
+                    name_match = re.search(r'اسمي.*?(\w+.*?)\s+ورقمي', response_text, re.IGNORECASE)
+                    phone_match = re.search(r'ورقمي.*?(\d+)', response_text, re.IGNORECASE)
+                    email_match = re.search(r'والايميل.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', response_text, re.IGNORECASE)
+                    
+                    name = name_match.group(1).strip() if name_match else "عميل"
+                    phone = phone_match.group(1).strip() if phone_match else ""
+                    email = email_match.group(1).strip() if email_match else ""
+                    
+                    # Create email content
+                    subject = f"طلب معلومات من {name}"
+                    body = f"""
+الاسم: {name}
+الهاتف: {phone}
+البريد الإلكتروني: {email}
+الرسالة: {response_text}
+                    """
+                    
+                    output = function_to_call(email, subject, body)
+                    logging.info(f"✅ send_email executed successfully")
+                    
+                    return {
+                        "function_output": output,
+                        "function_name": "send_email"
+                    }
+                except Exception as e:
+                    logging.error(f"🚫 Error executing send_email: {e}")
+                    return {
+                        "error": f"Error executing send_email: {str(e)}"
+                    }
+        
+        # Check for unit detail requests (lower priority) - make patterns more specific
         unit_detail_patterns = [
             r'تفاصيل الوحدة.*?(\d+)',
-            r'تفاصيل.*?(\d+)',
-            r'وحدة.*?(\d+)',
-            r'unit.*?(\d+)',
-            r'id.*?(\d+)',
-            r'رقم.*?(\d+)'
+            r'تفاصيل.*?الوحدة.*?(\d+)',
+            r'وحدة.*?رقم.*?(\d+)',
+            r'unit.*?id.*?(\d+)',
+            r'id.*?الوحدة.*?(\d+)',
+            r'الوحدة.*?(\d+)'
         ]
         
         for pattern in unit_detail_patterns:
