@@ -145,6 +145,7 @@ def _build_gemini_tools_list():
             "get_unit_details_tool",
             "insight_search_tool",
             "get_more_units_tool",
+            "get_current_datetime_tool",
         ]
         function_declarations = []
         for name in tool_names:
