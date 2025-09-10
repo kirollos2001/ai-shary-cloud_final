@@ -83,6 +83,9 @@ class RealEstateRAG:
         chroma_settings = Settings(anonymized_telemetry=False, allow_reset=True)
         self.client = chromadb.PersistentClient(path=persist_directory, settings=chroma_settings)
         self.embedder = GeminiEmbeddingFunction(variables.GEMINI_API_KEY)
+        # Cache for query embeddings to avoid regeneration
+        self._query_embedding_cache = {}
+        
         # Initialize collections with schema-mismatch recovery
         try:
             self._create_or_get_collections()
@@ -96,18 +99,110 @@ class RealEstateRAG:
             else:
                 raise
         logger.info("ChromaDB initialized with collections")
-        return
-        self.units_collection = self.client.get_or_create_collection(
-            name="real_estate_units",
-            metadata={"description": "Real estate units data for RAG"},
-            embedding_function=self.embedder
-        )
-        self.new_launches_collection = self.client.get_or_create_collection(
-            name="new_launches",
-            metadata={"description": "New property launches data for RAG"},
-            embedding_function=self.embedder
-        )
-        logger.info("✅ ChromaDB initialized with collections")
+        
+    def _parse_float(self, value, default=None):
+        try:
+            if value is None:
+                return default
+            if isinstance(value, (int, float)):
+                return float(value)
+            s = str(value).strip()
+            # Remove commas and non-digit characters except dot
+            import re
+            m = re.search(r"\d+(?:\.\d+)?", s.replace(',', ''))
+            if m:
+                return float(m.group(0))
+            return default
+        except Exception:
+            return default
+
+    def _parse_int(self, value, default=None):
+        try:
+            if value is None:
+                return default
+            if isinstance(value, (int, float)):
+                return int(value)
+            s = str(value).strip()
+            import re
+            m = re.search(r"\d+", s)
+            if m:
+                return int(m.group(0))
+            return default
+        except Exception:
+            return default
+
+    def _compute_post_filter_indices(self, results: Dict, filters: Dict) -> List[int]:
+        """Return indices of results that pass post filters for area and installment years.
+
+        - area tolerance: ±10%
+        - installment years tolerance: ±2
+        Only applies if corresponding filter values are provided by caller.
+        """
+        indices = []
+        try:
+            docs = results.get('documents') or []
+            if not docs or not docs[0]:
+                return indices
+
+            metas_list = (results.get('metadatas') or [[]])[0] if results.get('metadatas') else []
+
+            target_area = None
+            target_installment = None
+            if filters:
+                # Accept either 'area' or 'apartment_area' from filters
+                target_area = filters.get('apartment_area') if 'apartment_area' in filters else filters.get('area')
+                target_installment = filters.get('installment_years')
+
+            # If neither filter provided, return empty to indicate no filtering
+            if target_area in (None, "", 0) and target_installment in (None, "", 0):
+                return []
+
+            area_low, area_high = None, None
+            if target_area not in (None, "", 0):
+                area_val = self._parse_float(target_area)
+                if area_val is not None and area_val > 0:
+                    tol = 0.10
+                    area_low, area_high = area_val * (1 - tol), area_val * (1 + tol)
+
+            inst_low, inst_high = None, None
+            if target_installment not in (None, "", 0):
+                inst_val = self._parse_int(target_installment)
+                if inst_val is not None:
+                    inst_low, inst_high = inst_val - 2, inst_val + 2
+
+            # Evaluate each item in first result set
+            for i in range(len(docs[0])):
+                meta = metas_list[i] if metas_list and i < len(metas_list) else {}
+                ok = True
+
+                if area_low is not None and area_high is not None:
+                    area_meta = self._parse_float(meta.get('apartment_area'))
+                    # If metadata missing or unparsable, fail this condition
+                    if area_meta is None or not (area_low <= area_meta <= area_high):
+                        ok = False
+
+                if ok and inst_low is not None and inst_high is not None:
+                    inst_meta = self._parse_int(meta.get('installment_years'))
+                    if inst_meta is None or not (inst_low <= inst_meta <= inst_high):
+                        ok = False
+
+                if ok:
+                    indices.append(i)
+
+            return indices
+        except Exception as e:
+            logger.warning(f"Post-filter index computation failed: {e}")
+            return []
+
+    def _get_cached_query_embedding(self, query: str) -> List[float]:
+        """Get cached query embedding or generate and cache it"""
+        if query in self._query_embedding_cache:
+            return self._query_embedding_cache[query]
+        
+        # Generate new embedding and cache it
+        embedding = self.embedder.embed(query)
+        self._query_embedding_cache[query] = embedding
+        return embedding
     def reset_collections(self):
         """Reset collections to start fresh with correct dimensions"""
         try:
@@ -128,13 +223,23 @@ class RealEstateRAG:
             self.units_collection = self.client.create_collection(
                 name="real_estate_units",
                 metadata={"description": "Real estate units data for RAG with 3072-dim embeddings"},
-                embedding_function=self.embedder
+                embedding_function=self.embedder,
+                            # Add HNSW configuration to prevent the error
+            hnsw_config={
+                "M": 64,
+                "ef_construction": 200
+            }
             )
     
             self.new_launches_collection = self.client.create_collection(
                 name="new_launches",
                 metadata={"description": "New property launches data for RAG with 3072-dim embeddings"},
-                embedding_function=self.embedder
+                embedding_function=self.embedder,
+                            # Add HNSW configuration to prevent the error
+            hnsw_config={
+                "M": 64,
+                "ef_construction": 200
+            }
             )
     
             logger.info("Fresh collections created with 3072-dimensional embeddings")
@@ -356,13 +461,23 @@ Address: {city_name}
             self.units_collection = self.client.create_collection(
                 name="real_estate_units",
                 metadata={"description": "Real estate units data for RAG"},
-                embedding_function=self.embedder
+                embedding_function=self.embedder,
+                            # Add HNSW configuration to prevent the error
+            hnsw_config={
+                "M": 64,
+                "ef_construction": 200
+            }
             )
             
             self.new_launches_collection = self.client.create_collection(
                 name="new_launches",
                 metadata={"description": "New property launches data for RAG"},
-                embedding_function=self.embedder
+                embedding_function=self.embedder,
+                            # Add HNSW configuration to prevent the error
+            hnsw_config={
+                "M": 64,
+                "ef_construction": 200
+            }
             )
             
             logger.info("✅ Collections reset successfully")
@@ -397,8 +512,8 @@ Address: {city_name}
                 try:
                     from mmr_search import mmr
                     
-                    # Generate query embedding
-                    query_embedding = self.embedder.embed(query)
+                    # Generate query embedding (cached to avoid regeneration)
+                    query_embedding = self._get_cached_query_embedding(query)
                     
                     # Extract embeddings from results (if available)
                     embeddings = []
@@ -439,8 +554,12 @@ Address: {city_name}
         except Exception as e:
             logger.error(f"❌ Error in process_query_with_mmr: {e}")
             return []
-    def search_units(self, query: str, n_results: int = 10, filters: Dict = None) -> List[Dict]:
+    def search_units(self, query: str, n_results: int = 20, filters: Dict = None) -> List[Dict]:
         """Search units collection using MMR-optimized RAG pipeline"""
+        import time
+        start_time = time.time()
+        max_execution_time = 10.0  # 10 seconds timeout (matching functions.py)
+        
         try:
             # Build where clause for filters - ChromaDB requires separate clauses for range queries
             where_clauses = []
@@ -452,8 +571,8 @@ Address: {city_name}
                     where_clauses.append({'price_value': {'$lte': filters['price_max']}})
                 # Skip bedrooms/bathrooms for now as requested
                 pass  # No filters applied at ChromaDB level for now
-            # 1. Get candidates for MMR processing (RAG pipeline)
-            fetch_k = 100  # Set to 100 as requested
+            # 1. Get candidates for MMR processing (RAG pipeline) - reduced for performance
+            fetch_k = 100  # Reduced further for faster end-to-end latency
             
             # Use separate where clauses for ChromaDB compatibility
             if where_clauses:
@@ -463,7 +582,7 @@ Address: {city_name}
                         query_texts=[query],
                         n_results=fetch_k,
                         where=where_clauses[0],
-                        include=['embeddings', 'metadatas', 'distances', 'documents']
+                        include=['embeddings', 'metadatas', 'distances', 'documents'],
                     )
                 else:
                     # Multiple conditions - use $and
@@ -471,27 +590,33 @@ Address: {city_name}
                         query_texts=[query],
                         n_results=fetch_k,
                         where={"$and": where_clauses},
-                        include=['embeddings', 'metadatas', 'distances', 'documents']
+                        include=['embeddings', 'metadatas', 'distances', 'documents'],
                     )
             else:
                 # No where clause filters
                 results = self.units_collection.query(
                     query_texts=[query],
                     n_results=fetch_k,
-                    include=['embeddings', 'metadatas', 'distances', 'documents']
+                    include=['embeddings', 'metadatas', 'distances', 'documents'],
                 )
             
-            # 2. Apply area/installment filtering BEFORE MMR for better efficiency
+            # Check timeout before MMR processing
+            if time.time() - start_time > max_execution_time:
+                logger.warning("⚠️ Search timeout - returning early results")
+                return self._format_direct_results(results, n_results)
+            
+            # Check timeout before MMR processing
+            if time.time() - start_time > max_execution_time:
+                logger.warning("⚠️ New launches search timeout - returning early results")
+                return self._format_direct_results(results, n_results)
+            
+            # 2. Apply MMR directly for diversity and relevance
             if results and 'documents' in results and results['documents'] and results['documents'][0]:
                 logger.info(f"📊 Found {len(results['documents'][0])} documents from ChromaDB")
                 
-                # Apply pre-MMR filtering for area and installment years
-                results = self._apply_area_installment_filtering_pre_mmr(results, filters)
-                logger.info(f"✅ Applied pre-MMR filtering: {len(results['documents'][0])} documents remaining")
-                
                 try:
                     # Generate query embedding for MMR (cached to avoid redundant calls)
-                    query_embedding = self.embedder.embed(query)
+                    query_embedding = self._get_cached_query_embedding(query)
                     logger.info("✅ Generated query embedding")
                     
                     # Get embeddings from results - prefer ChromaDB embeddings to avoid regeneration
@@ -503,9 +628,56 @@ Address: {city_name}
                         logger.warning("⚠️ No embeddings returned from ChromaDB - this will cause performance issues")
                     
                     if embeddings is not None and len(embeddings) > 0:
-                        # Apply MMR algorithm for optimal diversity - increased k for better coverage
-                        from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=20, lambda_param=0.9)  # Set to 20 as requested
+                        # Post-filter by area (±10%) and installment years (±2) before MMR
+                        try:
+                            post_indices = self._compute_post_filter_indices(results, filters or {})
+                            use_post_filter = len(post_indices) > 0
+                            if use_post_filter:
+                                logger.info(f"Post-filter candidates: {len(post_indices)}")
+                                if len(post_indices) < 20:
+                                    logger.info("Post-filter < 20; using full set for MMR")
+                                    use_post_filter = False
+                            if use_post_filter:
+                                # Rebuild results arrays to only include the filtered pool
+                                pool_indices = post_indices
+                                try:
+                                    results['documents'][0] = [results['documents'][0][i] for i in pool_indices]
+                                except Exception:
+                                    pass
+                                try:
+                                    if 'metadatas' in results and results['metadatas'] and results['metadatas'][0]:
+                                        results['metadatas'][0] = [results['metadatas'][0][i] for i in pool_indices]
+                                except Exception:
+                                    pass
+                                try:
+                                    if 'distances' in results and results['distances'] and results['distances'][0]:
+                                        results['distances'][0] = [results['distances'][0][i] for i in pool_indices]
+                                except Exception:
+                                    pass
+                                embeddings = [embeddings[i] for i in pool_indices]
+                        except Exception as _pf_err:
+                            logger.warning(f"Post-filter step failed or skipped: {_pf_err}")
+                        # If we're close to timeout, shrink pool size aggressively
+                        try:
+                            elapsed = time.time() - start_time
+                            if elapsed > max_execution_time * 0.6:
+                                max_pool = 80
+                                if 'documents' in results and results['documents'] and results['documents'][0]:
+                                    results['documents'][0] = results['documents'][0][:max_pool]
+                                if 'metadatas' in results and results['metadatas'] and results['metadatas'][0]:
+                                    results['metadatas'][0] = results['metadatas'][0][:max_pool]
+                                if 'distances' in results and results['distances'] and results['distances'][0]:
+                                    results['distances'][0] = results['distances'][0][:max_pool]
+                                embeddings = embeddings[:max_pool]
+                                logger.info(f"⏱️ Near timeout; reduced pool to {len(embeddings)} for MMR")
+                        except Exception:
+                            pass
+                        # Apply faster vectorized MMR for optimal diversity
+                        try:
+                            from mmr_search import mmr_fast as mmr
+                        except Exception:
+                            from mmr_search import mmr
+                        mmr_indices = mmr(query_embedding, embeddings, k=min(n_results, 20), lambda_param=0.9)
                         logger.info(f"✅ MMR selected {len(mmr_indices)} indices: {mmr_indices}")
                         
                         # Get MMR-optimized results
@@ -524,9 +696,14 @@ Address: {city_name}
                         reranked_results = self._apply_numeric_reranking(mmr_results, filters)
                         logger.info(f"✅ Re-ranked to {len(reranked_results)} results")
                         
-                        # Apply deduplication based on ID (area/installment filtering already done pre-MMR)
+                        # Apply deduplication based on ID
                         deduplicated_results = self._deduplicate_results(reranked_results)
                         logger.info(f"✅ Deduplicated to {len(deduplicated_results)} results")
+                        
+                        # Check timeout before returning results
+                        if time.time() - start_time > max_execution_time:
+                            logger.warning("⚠️ Search timeout - returning early results")
+                            return deduplicated_results[:n_results]
                         
                         return deduplicated_results[:n_results]
                     else:
@@ -551,6 +728,12 @@ Address: {city_name}
         except Exception as e:
             logger.error(f"❌ Error searching units: {e}")
             return []
+        finally:
+            execution_time = time.time() - start_time
+            if execution_time > max_execution_time:
+                logger.warning(f"⚠️ Search took {execution_time:.2f}s (exceeded {max_execution_time}s limit)")
+            else:
+                logger.info(f"✅ Search completed in {execution_time:.2f}s")
     def _format_direct_results(self, results: Dict, n_results: int) -> List[Dict]:
         """Helper method to format results when MMR is not available"""
         formatted_results = []
@@ -679,205 +862,12 @@ Address: {city_name}
                     unique_results.append(item)
         
         return unique_results
-    
-    def _apply_area_installment_filtering_pre_mmr(self, chroma_results: Dict, filters: Dict = None) -> Dict:
-        """Apply apartment_area and installment_years filtering BEFORE MMR for better efficiency"""
-        try:
-            if not filters or not chroma_results or not chroma_results.get('documents') or not chroma_results['documents'][0]:
-                return chroma_results
-            
-            # Check if we have apartment_area or installment_years filters
-            apartment_area = filters.get('apartment_area')
-            installment_years = filters.get('installment_years')
-            
-            # Check if we have valid numeric values for filtering
-            has_area_filter = apartment_area is not None and apartment_area != 0 and isinstance(apartment_area, (int, float))
-            has_installment_filter = installment_years is not None and installment_years != 0 and isinstance(installment_years, (int, float))
-            
-            if not has_area_filter and not has_installment_filter:
-                return chroma_results
-            
-            logger.info(f"📊 Applying area/installment filtering pre-MMR on {len(chroma_results['documents'][0])} documents")
-        except Exception as e:
-            logger.error(f"❌ Error in pre-MMR filtering setup: {e}")
-            return chroma_results
-        
-        # Filter documents, metadatas, embeddings, and distances
-        filtered_docs = []
-        filtered_metadatas = []
-        filtered_embeddings = []
-        filtered_distances = []
-        
-        try:
-            start_time = time.time()
-            max_filtering_time = 3.0  # 3 seconds max for filtering
-            
-            total_docs = len(chroma_results['documents'][0])
-            for i, doc in enumerate(chroma_results['documents'][0]):
-                # Check timeout during filtering
-                if time.time() - start_time > max_filtering_time:
-                    logger.warning(f"⚠️ Filtering timeout after {max_filtering_time}s, using original results")
-                    return chroma_results
-                
-                # Early exit if we have enough results and are past 50% of documents
-                if len(filtered_docs) >= 50 and i > total_docs * 0.5:
-                    logger.info(f"✅ Early exit: Found {len(filtered_docs)} results after checking {i}/{total_docs} documents")
-                    break
-                try:
-                    if chroma_results.get('metadatas') and chroma_results['metadatas'] and len(chroma_results['metadatas']) > 0 and chroma_results['metadatas'][0]:
-                        metadata = chroma_results['metadatas'][0][i]
-                    else:
-                        metadata = {}
-                    include_result = True
-                except Exception as e:
-                    logger.error(f"❌ Error accessing metadata for index {i}: {e}")
-                    import traceback
-                    logger.error(f"❌ Metadata access traceback: {traceback.format_exc()}")
-                    continue
-                
-                # Apply apartment_area filtering with ±10% tolerance
-                if has_area_filter and include_result:
-                    try:
-                        unit_area = metadata.get('apartment_area', 0)
-                        # Handle array values
-                        if isinstance(unit_area, (list, tuple)):
-                            unit_area = unit_area[0] if unit_area else 0
-                        unit_area = float(unit_area) if unit_area else 0
-                        if unit_area > 0:
-                            # Calculate tolerance: ±10%
-                            tolerance = float(apartment_area) * 0.1
-                            min_area = float(apartment_area) - tolerance
-                            max_area = float(apartment_area) + tolerance
-                            
-                            if not (min_area <= unit_area <= max_area):
-                                include_result = False
-                                logger.debug(f"❌ Area filter: {unit_area} not in range [{min_area}, {max_area}]")
-                    except (ValueError, TypeError, Exception) as e:
-                        # If we can't parse the area, include the result
-                        logger.debug(f"⚠️ Area filter error for index {i}: {e}")
-                        pass
-                
-                # Apply installment_years filtering with ±2 years tolerance
-                if has_installment_filter and include_result:
-                    try:
-                        unit_installment = metadata.get('installment_years', 0)
-                        # Handle array values
-                        if isinstance(unit_installment, (list, tuple)):
-                            unit_installment = unit_installment[0] if unit_installment else 0
-                        unit_installment = float(unit_installment) if unit_installment else 0
-                        if unit_installment > 0:
-                            # Calculate tolerance: ±2 years
-                            min_installment = float(installment_years) - 2
-                            max_installment = float(installment_years) + 2
-                            
-                            if not (min_installment <= unit_installment <= max_installment):
-                                include_result = False
-                                logger.debug(f"❌ Installment filter: {unit_installment} not in range [{min_installment}, {max_installment}]")
-                    except (ValueError, TypeError, Exception) as e:
-                        # If we can't parse the installment, include the result
-                        logger.debug(f"⚠️ Installment filter error for index {i}: {e}")
-                        pass
-                
-                if include_result:
-                    filtered_docs.append(doc)
-                    if chroma_results.get('metadatas') and chroma_results['metadatas'] and len(chroma_results['metadatas']) > 0 and len(chroma_results['metadatas'][0]) > 0:
-                        filtered_metadatas.append(metadata)
-                    if chroma_results.get('embeddings') and chroma_results['embeddings'] and len(chroma_results['embeddings']) > 0 and len(chroma_results['embeddings'][0]) > 0:
-                        filtered_embeddings.append(chroma_results['embeddings'][0][i])
-                    if chroma_results.get('distances') and chroma_results['distances'] and len(chroma_results['distances']) > 0 and len(chroma_results['distances'][0]) > 0:
-                        filtered_distances.append(chroma_results['distances'][0][i])
-            
-            # Create filtered results dictionary
-            filtered_results = {
-                'documents': [filtered_docs],
-                'metadatas': [filtered_metadatas] if filtered_metadatas else chroma_results.get('metadatas', [[]]),
-                'embeddings': [filtered_embeddings] if filtered_embeddings else chroma_results.get('embeddings', [[]]),
-                'distances': [filtered_distances] if filtered_distances else chroma_results.get('distances', [[]])
-            }
-            
-            logger.info(f"✅ Pre-MMR filtering: {len(chroma_results['documents'][0])} -> {len(filtered_docs)} documents")
-            
-            # Check if results after filtering are too few (≤10) - cancel filtering and use original results
-            if len(filtered_docs) <= 20:
-                logger.info(f"⚠️ Only {len(filtered_docs)} results after filtering (≤10), canceling area/installment filtering")
-                return chroma_results
-            
-            return filtered_results
-            
-        except Exception as e:
-            logger.error(f"❌ Error in pre-MMR filtering loop: {e}")
-            import traceback
-            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
-            return chroma_results
-
-    def _apply_area_installment_filtering(self, results: List[Dict], filters: Dict = None) -> List[Dict]:
-        """Apply apartment_area and installment_years filtering based on document count threshold"""
-        if not filters or not results:
-            return results
-        
-        # Check if we have apartment_area or installment_years filters
-        apartment_area = filters.get('apartment_area')
-        installment_years = filters.get('installment_years')
-        
-        if not apartment_area and not installment_years:
-            return results
-        
-        # Apply filtering only if we have more than 50 documents
-        if len(results) <= 50:
-            logger.info(f"📊 Document count ({len(results)}) <= 50, skipping area/installment filtering")
-            return results
-        
-        logger.info(f"📊 Document count ({len(results)}) > 50, applying area/installment filtering")
-        
-        filtered_results = []
-        
-        for result in results:
-            metadata = result.get('metadata', {})
-            include_result = True
-            
-            # Apply apartment_area filtering with ±10% tolerance
-            if apartment_area:
-                unit_area = metadata.get('apartment_area', 0)
-                try:
-                    unit_area = float(unit_area) if unit_area else 0
-                    if unit_area > 0:
-                        # Calculate tolerance: ±10%
-                        tolerance = apartment_area * 0.1
-                        min_area = apartment_area - tolerance
-                        max_area = apartment_area + tolerance
-                        
-                        if not (min_area <= unit_area <= max_area):
-                            include_result = False
-                            logger.debug(f"❌ Area filter: {unit_area} not in range [{min_area}, {max_area}]")
-                except (ValueError, TypeError):
-                    # If we can't parse the area, include the result
-                    pass
-            
-            # Apply installment_years filtering with ±2 years tolerance
-            if installment_years and include_result:
-                unit_installment = metadata.get('installment_years', 0)
-                try:
-                    unit_installment = float(unit_installment) if unit_installment else 0
-                    if unit_installment > 0:
-                        # Calculate tolerance: ±2 years
-                        min_years = installment_years - 2
-                        max_years = installment_years + 2
-                        
-                        if not (min_years <= unit_installment <= max_years):
-                            include_result = False
-                            logger.debug(f"❌ Installment filter: {unit_installment} not in range [{min_years}, {max_years}]")
-                except (ValueError, TypeError):
-                    # If we can't parse the installment years, include the result
-                    pass
-            
-            if include_result:
-                filtered_results.append(result)
-        
-        logger.info(f"✅ Area/installment filtering: {len(results)} → {len(filtered_results)} results")
-        return filtered_results
-    
     def search_new_launches(self, query: str, n_results: int = 10, filters: Dict = None) -> List[Dict]:
         """Search new launches collection using MMR-optimized RAG pipeline"""
+        import time
+        start_time = time.time()
+        max_execution_time = 8.0  # 8 seconds timeout
+        
         try:
             # Build where clause for filters - ChromaDB requires separate clauses for range queries
             where_clauses = []
@@ -893,8 +883,8 @@ Address: {city_name}
                 if 'location' in filters and filters['location']:
                     # Note: Location filtering would need to be done post-search since it's in the document text
                     pass
-            # 1. Get candidates for MMR processing (RAG pipeline)
-            fetch_k = 100  # Set to 100 as requested
+            # 1. Get candidates for MMR processing (RAG pipeline) - reduced for performance
+            fetch_k = 100  # Reduced from 1000 to 100 for better performance
             
             # Use separate where clauses for ChromaDB compatibility
             if where_clauses:
@@ -925,7 +915,7 @@ Address: {city_name}
             if results and 'documents' in results and results['documents'] and results['documents'][0]:
                 try:
                     # Generate query embedding for MMR
-                    query_embedding = self.embedder.embed(query)
+                    query_embedding = self._get_cached_query_embedding(query)
                     
                     # Get embeddings from results or generate them
                     embeddings = None
@@ -935,7 +925,7 @@ Address: {city_name}
                     if embeddings is not None and len(embeddings) > 0:
                         # Apply MMR algorithm for optimal diversity - reduced k for performance
                         from mmr_search import mmr
-                        mmr_indices = mmr(query_embedding, embeddings, k=20, lambda_param=0.8)  # Set to 20 as requested
+                        mmr_indices = mmr(query_embedding, embeddings, k=10, lambda_param=0.8)  # Further reduced for better performance
                         
                         # Get MMR-optimized results
                         mmr_results = []
@@ -979,6 +969,12 @@ Address: {city_name}
         except Exception as e:
             logger.error(f"❌ Error searching new launches: {e}")
             return []
+        finally:
+            execution_time = time.time() - start_time
+            if execution_time > max_execution_time:
+                logger.warning(f"⚠️ New launches search took {execution_time:.2f}s (exceeded {max_execution_time}s limit)")
+            else:
+                logger.info(f"✅ New launches search completed in {execution_time:.2f}s")
     def search_all(self, query: str, n_results: int = 20) -> Dict[str, List[Dict]]:
         """Search both collections using MMR-optimized RAG pipeline"""
         try:
