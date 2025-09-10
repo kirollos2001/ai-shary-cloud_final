@@ -687,8 +687,6 @@ def property_search(arguments):
         property_type = arguments.get("property_type", "").strip().lower()
         bedrooms = arguments.get("bedrooms")
         bathrooms = arguments.get("bathrooms")
-        apartment_area = arguments.get("apartment_area")
-        installment_years = arguments.get("installment_years")
         # Optional preferred compound (accept both 'compound' and 'compound_name')
         compound_name = (arguments.get("compound") or arguments.get("compound_name") or "").strip()
         
@@ -707,45 +705,7 @@ def property_search(arguments):
             missing_fields.append("الميزانية")
         if not property_type:
             missing_fields.append("نوع العقار")
-        
-        # Require area and installment years before searching
-        try:
-            _ = apartment_area
-        except NameError:
-            apartment_area = arguments.get("apartment_area")
-        try:
-            _ = installment_years
-        except NameError:
-            installment_years = arguments.get("installment_years")
-        if apartment_area in (None, "", 0):
-            missing_fields.append("المساحة (بالمتر)")
-        if installment_years in (None, "", 0):
-            missing_fields.append("سنين التقسيط")
 
-        # If any required info is missing, ask for area and installment years first
-        if missing_fields:
-            try:
-                need_area = "��꫟�� (���ꢩ)" in missing_fields or "المساحة (بالمتر)" in missing_fields
-                need_installments = "���� �����" in missing_fields or "سنين التقسيط" in missing_fields
-                ask_parts = []
-                if need_area:
-                    ask_parts.append("المساحة التقريبية بالمتر؟")
-                if need_installments:
-                    ask_parts.append("تحب التقسيط على كام سنة؟")
-                ask_phrase = " و ".join(ask_parts) if ask_parts else ""
-                prefix = "قبل ما أقدر أدور لك بدقة، محتاج أعرف: " if ask_phrase else "من فضلك كمل البيانات التالية: "
-                message_new = prefix + ask_phrase
-                others = [f for f in missing_fields if f not in ["��꫟�� (���ꢩ)", "���� �����", "المساحة (بالمتر)", "سنين التقسيط"]]
-                if others:
-                    message_new += ("\nناقص كمان: " + ", ".join(others))
-            except Exception:
-                message_new = "من فضلك اديني المساحة بالمتر وسنين التقسيط قبل ما نبدأ البحث."
-
-            return {
-                "source": "validation",
-                "message": message_new.strip(),
-                "results": []
-            }
         if missing_fields:
             message = "محتاج منك معلومات أساسية قبل ما أبدأ البحث: " + ", ".join(missing_fields) + ".\n"
             message += "- مثال للميزانية: 4,000,000 أو 4 مليون\n"
@@ -794,10 +754,6 @@ def property_search(arguments):
             search_query_parts.append(f"{bedrooms} bedrooms")
         if bathrooms:
             search_query_parts.append(f"{bathrooms} bathrooms")
-        if apartment_area:
-            search_query_parts.append(f"area around {apartment_area}")
-        if installment_years:
-            search_query_parts.append(f"installment {installment_years} years")
         
         # Create semantic search query
         search_query = " ".join(search_query_parts) if search_query_parts else "property units"
@@ -834,6 +790,12 @@ def property_search(arguments):
                 else:
                     filters["price_min"] = int(min_budget)
                     filters["price_max"] = int(max_budget)
+            # Forward optional numeric filters for post-filtering (area ±10%, installments ±2)
+            if arguments.get("apartment_area"):
+                filters["apartment_area"] = arguments.get("apartment_area")
+            if arguments.get("installment_years"):
+                filters["installment_years"] = arguments.get("installment_years")
+
             # Pass semantic hints for reranker (not used in Chroma where clause)
             if location:
                 filters["query_location"] = location
@@ -841,10 +803,6 @@ def property_search(arguments):
                 filters["query_property_type"] = property_type
             if compound_name:
                 filters["query_compound"] = compound_name
-            if apartment_area:
-                filters["apartment_area"] = apartment_area
-            if installment_years:
-                filters["installment_years"] = installment_years
             
             # Check timeout before search
             if time.time() - start_time > max_execution_time:
@@ -2117,8 +2075,6 @@ def intelligent_property_search_with_expansion(user_query, search_arguments, chr
             'price_max': search_arguments.get('budget', 0),
             'bedrooms': search_arguments.get('bedrooms'),
             'bathrooms': search_arguments.get('bathrooms'),
-            'area_min': search_arguments.get('apartment_area'),
-            'installment_years': search_arguments.get('installment_years'),
             'delivery_type': search_arguments.get('delivery_type', '').strip().lower()
         }
         
@@ -2280,19 +2236,6 @@ def _apply_progressive_filtering(results, numeric_filters, search_strategy, targ
             search_strategy['filters_applied'].append('bedrooms')
             print(f"✅ Applied bedrooms filter: {len(results)} results")
     
-    # Filter 2: Area (if specified)
-    if numeric_filters['area_min'] and len(results) > target_results:
-        area_tolerance = 30  # ±30 sqm tolerance
-        filtered_results = []
-        for result in results:
-            result_area = result['metadata'].get('area', 0)
-            if abs(result_area - numeric_filters['area_min']) <= area_tolerance:
-                filtered_results.append(result)
-        
-        if len(filtered_results) >= target_results * 0.5:
-            results = filtered_results
-            search_strategy['filters_applied'].append('area')
-            print(f"✅ Applied area filter: {len(results)} results")
     
     # Filter 3: Bathrooms (if specified)
     if numeric_filters['bathrooms'] and len(results) > target_results:
@@ -2316,11 +2259,6 @@ def _apply_expansion_policy(query_text, chroma_collection, embedder, numeric_fil
     """
     print(f"🔍 Applying expansion policy to increase results above {min_results}")
     
-    # Expansion 1: Relax area constraints
-    if numeric_filters['area_min']:
-        area_tolerance = 50  # Increase to ±50 sqm
-        search_strategy['expansion_steps'].append(f'area_tolerance_increased_to_{area_tolerance}')
-        print(f"📏 Increased area tolerance to ±{area_tolerance} sqm")
     
     # Expansion 2: Relax bedroom constraints
     if numeric_filters['bedrooms']:
@@ -3148,5 +3086,3 @@ def advanced_conversation_summary_from_db(client_id, conversation_id, name="Unkn
     except Exception as e:
         print(f"🚨 Error generating summary: {e}")
         return f"❌ حصل خطأ أثناء تلخيص المحادثة: {e}"
-
-
