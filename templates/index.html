@@ -324,6 +324,11 @@
             color: var(--text-muted);
         }
 
+        #userInput.transcribed {
+            border-color: var(--brand-teal);
+            box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.1);
+        }
+
         .send-button {
             padding: 16px 20px;
             background: linear-gradient(135deg, var(--brand-blue), var(--brand-blue-hover));
@@ -780,6 +785,42 @@
             if (wave) wave.style.display = 'none';
         }
 
+        function showTranscriptionComplete() {
+            // Create a temporary notification
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: var(--brand-teal);
+                color: white;
+                padding: 12px 20px;
+                border-radius: 12px;
+                font-size: 14px;
+                font-weight: 500;
+                box-shadow: 0 4px 12px rgba(6, 182, 212, 0.3);
+                z-index: 1000;
+                opacity: 0;
+                transform: translateX(100px);
+                transition: all 0.3s ease;
+            `;
+            notification.textContent = '🎤 Transcription complete - ready to send';
+            document.body.appendChild(notification);
+
+            // Animate in
+            setTimeout(() => {
+                notification.style.opacity = '1';
+                notification.style.transform = 'translateX(0)';
+            }, 10);
+
+            // Remove after 3 seconds
+            setTimeout(() => {
+                notification.style.opacity = '0';
+                notification.style.transform = 'translateX(100px)';
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+
         // Audio recording helpers
         async function toggleRecording() {
             if (isRecording) {
@@ -806,18 +847,38 @@
                     formData.append('thread_id', threadId);
                     try {
                         const resp = await fetch('/chat/audio', { method: 'POST', body: formData });
-                        const data = await resp.json();
-                        if (data.transcript) {
-                            const input = document.getElementById('userInput');
-                            input.value = data.transcript;
-                            adjustTextareaHeight();
-                            input.focus();
-                        } else if (data.error) {
-                            alert(data.error);
+                        
+                        // Handle empty audio (204 No Content) gracefully
+                        if (resp.status === 204) {
+                            console.log('Empty audio received - ignoring silently');
+                            return;
+                        }
+                        
+                        // Handle successful transcription
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            if (data.transcript && data.transcript.trim()) {
+                                const input = document.getElementById('userInput');
+                                input.value = data.transcript;
+                                input.classList.add('transcribed');
+                                adjustTextareaHeight();
+                                input.focus();
+
+                                // Show a subtle notification that transcription is complete
+                                showTranscriptionComplete();
+
+                                // Remove the transcribed styling when user starts typing
+                                input.addEventListener('input', function () {
+                                    input.classList.remove('transcribed');
+                                }, { once: true });
+                            }
+                        } else {
+                            // Handle other errors gracefully without showing alerts
+                            console.log('Transcription service unavailable - ignoring silently');
                         }
                     } catch (err) {
-                        console.error('Audio upload failed', err);
-                        alert('Transcription failed');
+                        // Handle network errors gracefully without showing alerts
+                        console.log('Audio processing failed - ignoring silently');
                     }
                 };
                 mediaRecorder.start();
