@@ -24,7 +24,7 @@ import asyncio
 import atexit
 import time
 from concurrent.futures import ThreadPoolExecutor
-from speech_utils import transcribe_audio
+
 from flask import Flask, render_template, request, jsonify, make_response
 import google.generativeai as genai
 from google.generativeai import types
@@ -38,6 +38,7 @@ import functions
 import Cache_code
 from session_store import save_session, get_session
 import variables
+import speech_utils
 from config import (
     property_search_tool,
     schedule_viewing_tool,
@@ -47,7 +48,6 @@ from config import (
     get_more_units_tool,
     configure_gemini,
 )
-
 
 # -------------------------------------------------------
 # Optional local .env loader (ignored on Cloud Run)
@@ -62,19 +62,15 @@ except FileNotFoundError:
     pass
 
 # -------------------------------------------------------
-# Set Google Cloud environment variables if not already set
+# Set Google Cloud credentials for local development
 # -------------------------------------------------------
 if not os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
-    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = r"C:\Users\kirollos\Downloads\new clean\sharyai-main\shary_ai_agent_cred.json"
-    logging.info("✅ Set GOOGLE_APPLICATION_CREDENTIALS from code")
-
-if not os.environ.get('GOOGLE_CLOUD_PROJECT'):
-    os.environ['GOOGLE_CLOUD_PROJECT'] = 'shary-ai-agent'
-    logging.info("✅ Set GOOGLE_CLOUD_PROJECT from code")
-
-if not os.environ.get('SPEECH_LANGUAGE'):
-    os.environ['SPEECH_LANGUAGE'] = 'ar-EG'
-    logging.info("✅ Set SPEECH_LANGUAGE from code")
+    credentials_path = os.path.join(os.path.dirname(__file__), 'shary_ai_agent_cred.json')
+    if os.path.exists(credentials_path):
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
+        logging.info(f"✅ Set Google Cloud credentials: {credentials_path}")
+    else:
+        logging.warning("⚠️ Google Cloud credentials file not found - audio transcription may not work")
 
 # -------------------------------------------------------
 # Logging
@@ -175,84 +171,6 @@ def start_conversation():
     logging.info(f"New session created with ID: {session_id}")
     config.client_sessions[session_id] = client_info
     return jsonify({"thread_id": session_id})
-    
-@app.route("/chat/audio", methods=["POST"])
-def chat_audio():
-    """Transcribe uploaded audio and return the transcript."""
-    try:
-        thread_id = request.form.get("thread_id")
-        if not thread_id:
-            logging.warning("No thread_id provided in /chat/audio request.")
-            return jsonify({"error": "thread_id is required"}), 400
-
-        audio_file = request.files.get("audio")
-        if not audio_file:
-            logging.warning("No audio file provided in /chat/audio request.")
-            return jsonify({"error": "audio file is required"}), 400
-
-        audio_bytes = audio_file.read()
-        logging.info(f"Received audio file for transcription: {audio_file.filename}, size={len(audio_bytes)} bytes, mime_type: {audio_file.mimetype}")
-
-        # Check for empty or very small audio files (likely silence or empty recording)
-        if len(audio_bytes) < 1000:  # Less than 1KB is likely empty/silent
-            logging.info("Audio file too small, likely empty or silent - ignoring gracefully")
-            return jsonify({"transcript": "", "thread_id": thread_id, "empty_audio": True})
-
-        # Check environment variables
-        logging.info(f"Environment check - GOOGLE_APPLICATION_CREDENTIALS: {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'NOT SET')}")
-        logging.info(f"Environment check - GOOGLE_CLOUD_PROJECT: {os.environ.get('GOOGLE_CLOUD_PROJECT', 'NOT SET')}")
-        logging.info(f"Environment check - SPEECH_LANGUAGE: {os.environ.get('SPEECH_LANGUAGE', 'NOT SET')}")
-
-        # Proactive dependency and credentials checks for clearer errors
-        try:
-            from google.cloud import speech_v2 as _speech_v2  # noqa: F401
-        except Exception:
-            logging.error("Google Cloud Speech-to-Text library not installed.")
-            return (
-                jsonify({
-                    "error": "Speech-to-Text dependency missing",
-                    "detail": "google-cloud-speech is not installed",
-                    "action": "pip install google-cloud-speech",
-                }),
-                501,
-            )
-
-        creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        if not creds_path or not os.path.exists(creds_path):
-            logging.error("GOOGLE_APPLICATION_CREDENTIALS not set or file not found")
-            return (
-                jsonify({
-                    "error": "Missing Google credentials",
-                    "detail": "Set GOOGLE_APPLICATION_CREDENTIALS to a valid service account JSON path",
-                }),
-                500,
-            )
-
-        if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
-            logging.error("GOOGLE_CLOUD_PROJECT is not configured")
-            return (
-                jsonify({
-                    "error": "Missing configuration",
-                    "detail": "Set GOOGLE_CLOUD_PROJECT environment variable",
-                }),
-                500,
-            )
-
-        transcript = transcribe_audio(audio_bytes, audio_file.mimetype)
-        logging.info(f"Transcription result: '{transcript}'")
-
-        # Handle empty transcript gracefully (like ChatGPT)
-        if not transcript or transcript.strip() == "":
-            logging.info("Transcription returned empty result - treating as empty audio")
-            return jsonify({"transcript": "", "thread_id": thread_id, "empty_audio": True})
-
-        return jsonify({"transcript": transcript, "thread_id": thread_id})
-        
-    except Exception as e:
-        logging.error(f"Error in chat_audio endpoint: {e}")
-        import traceback
-        logging.error(f"Traceback: {traceback.format_exc()}")
-        return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
 
 @app.route("/chat", methods=["GET", "POST"])
 def chat():
@@ -313,6 +231,7 @@ def chat():
              and str(c.get("user_id")) == str(user_id)),
             None
         )
+
         if conversation:
             # Limit history to last 5 messages for performance
             recent_messages = conversation.get("description", [])[-5:]
@@ -408,6 +327,33 @@ def chat():
         finally:
             loop.close()
         logging.info(f"Result from run_async_tool_calls: {result}")
+        # Safety: If the model tried to open unit details without an explicit details intent, steer back
+        try:
+            if isinstance(result, dict) and result.get('function_name') == 'get_unit_details':
+                import re as _re
+                _hint_re = r'(تفاصيل|details|show\s+unit|رقم\s*الوحدة|\bunit\b|\bid\b)'
+                _cont = bool(_re.search(r'(نكمل|كمل|من غير|بدون|continue|skip)', user_message or '', flags=_re.IGNORECASE))
+                if not _re.search(_hint_re, user_message or '', flags=_re.IGNORECASE) and not _cont:
+                    bot_response = (
+                        "حابب أساعدك بالبحث أولاً. قبل ما أبدأ أبحث لك، ممكن تقولّي المساحة اللي تناسبك بالمتر؟ "
+                        "وكمان عدد سنوات التقسيط اللي تحبها؟ (مثلاً: المساحة 150 م²، التقسيط 8 سنين)."
+                    )
+                    response_data = {"response": bot_response, "thread_id": thread_id}
+                    try:
+                        executor.submit(functions.create_lead, lead_data)
+                    except Exception as e:
+                        logging.warning(f"Background lead creation failed: {e}")
+                    try:
+                        executor.submit(functions.log_conversation_to_db, thread_id, user_id, user_message)
+                    except Exception as e:
+                        logging.warning(f"Background user conversation logging failed: {e}")
+                    try:
+                        executor.submit(functions.log_conversation_to_db, thread_id, "bot", bot_response)
+                    except Exception as e:
+                        logging.warning(f"Background bot response logging failed: {e}")
+                    return jsonify(response_data)
+        except Exception:
+            pass
 
         # Early fallback: if the model errored, try to run a search directly
         try:
@@ -427,7 +373,7 @@ def chat():
                     cached_leads = _load_cache("leads_cache.json") or []
                     last_lead = next((l for l in cached_leads if str(l.get("user_id")) == str(user_id)), None)
                     if last_lead:
-                        for k in ["budget", "location", "property_type", "bedrooms"]:
+                        for k in ["budget", "location", "property_type", "bedrooms", "bathrooms"]:
                             if not merged_prefs.get(k) and last_lead.get(k):
                                 merged_prefs[k] = last_lead.get(k)
                 except Exception:
@@ -541,36 +487,46 @@ def chat():
                 has_location = bool(merged_prefs.get("location"))
                 has_budget = merged_prefs.get("budget", 0) > 0
                 has_property_type = bool(merged_prefs.get("property_type"))
-                has_area = merged_prefs.get("apartment_area", 0) > 0
-                has_installments = merged_prefs.get("installment_years", 0) > 0
-                has_area = merged_prefs.get("apartment_area", 0) > 0
-                has_installments = merged_prefs.get("installment_years", 0) > 0
-                logging.info(f"Auto-trigger (error fallback, extended) ? area:{has_area} inst:{has_installments}")
                 logging.info(f"Auto-trigger (error fallback) — loc:{has_location} budget:{has_budget} type:{has_property_type}")
 
-                # Only trigger search when core signals + area + installments are ready
-                core_ready = has_location and has_budget and has_property_type
-                if core_ready and has_area and has_installments:
+                # Relax: trigger if at least two core signals are present
+                if (has_budget and has_property_type) or (has_budget and has_location) or (has_property_type and has_location):
                     search_args = {
                         "location": merged_prefs.get("location", ""),
                         "budget": merged_prefs.get("budget", 0),
                         "property_type": merged_prefs.get("property_type", ""),
                         "bedrooms": merged_prefs.get("bedrooms", 0),
-                        "compound": merged_prefs.get("compound_name", ""),
-                        "apartment_area": merged_prefs.get("apartment_area", 0),
-                        "installment_years": merged_prefs.get("installment_years", 0),
+                        "bathrooms": merged_prefs.get("bathrooms", 0),
+                        "compound": merged_prefs.get("compound_name", "")
                     }
+                    # Ask about area and installment years before searching (mandatory questions to ask; user may skip)
+                    _cont = False
+                    try:
+                        import re as _re
+                        _cont = bool(_re.search(r'(نكمل|كمل|من غير|بدون|continue|skip)', user_message or '', flags=_re.IGNORECASE))
+                    except Exception:
+                        _cont = False
+                    if (not search_args.get("apartment_area") or not search_args.get("installment_years")) and not _cont:
+                        bot_response = (
+                            "قبل ما أبدأ أبحث لك، ممكن تقولّي المساحة اللي تناسبك بالمتر؟ "
+                            "وكمان عدد سنوات التقسيط اللي تحبها؟ (مثلاً: المساحة 150 م²، التقسيط 8 سنين). "
+                            "لو تحب نكمل من غيرهم، قولّي نكمل وخلاص."
+                        )
+                        response_data = {"response": bot_response, "thread_id": thread_id}
+                        try:
+                            executor.submit(functions.create_lead, lead_data)
+                        except Exception as e:
+                            logging.warning(f"Background lead creation failed: {e}")
+                        try:
+                            executor.submit(functions.log_conversation_to_db, thread_id, user_id, user_message)
+                        except Exception as e:
+                            logging.warning(f"Background user conversation logging failed: {e}")
+                        try:
+                            executor.submit(functions.log_conversation_to_db, thread_id, "bot", bot_response)
+                        except Exception as e:
+                            logging.warning(f"Background bot response logging failed: {e}")
+                        return jsonify(response_data)
                     function_output = functions.property_search(search_args)
-                elif core_ready and (not has_area or not has_installments):
-                    # Ask for missing info instead of searching prematurely
-                    missing_parts = []
-                    if not has_area:
-                        missing_parts.append("المساحة بالمتر؟")
-                    if not has_installments:
-                        missing_parts.append("التقسيط على كام سنة؟")
-                    ask = " و ".join(missing_parts)
-                    bot_response = f"تمام! قبل ما أدور لك بدقة، محتاج أعرف: {ask}"
-                    auto_triggered = True
                     if function_output:
                         if function_output.get('results'):
                             results = function_output.get('results', [])
@@ -584,6 +540,7 @@ def chat():
                                         f"{line.get('name_ar', line.get('name_en','N/A'))} | "
                                         f"Price: {line.get('price', 'N/A')} | "
                                         f"Rooms: {line.get('Bedrooms', line.get('bedrooms','N/A'))} | "
+                                        f"Baths: {line.get('Bathrooms', line.get('bathrooms','N/A'))}\n"
                                     )
                             message = function_output.get('message', '')
                             follow_up = function_output.get('follow_up', '')
@@ -633,6 +590,7 @@ def chat():
                                 f"{line.get('name_ar', line.get('name_en','غير متوفر'))} | "
                                 f"السعر: {line.get('price', 'غير متوفر')} | "
                                 f"غرف: {line.get('Bedrooms', line.get('bedrooms','غير متوفر'))} | "
+                                f"حمام: {line.get('Bathrooms', line.get('bathrooms','غير متوفر'))}\n"
                             )
                     message = function_output.get('message', '')
                     follow_up = function_output.get('follow_up', '')
@@ -691,6 +649,7 @@ def chat():
                 except Exception as _e:
                     logging.warning(f'Auto-chain scheduling after get_current_datetime failed: {_e}')
                     bot_response = function_output.get('message') or 'تم حساب التاريخ.'
+                bot_response = function_output.get('message', '✅ تم حجز الموعد بنجاح!')
 
             elif function_name == 'insight_search':
                 message = function_output.get('message', '')
@@ -711,6 +670,7 @@ def chat():
                                 f"{line.get('name_ar', line.get('name_en','غير متوفر'))} | "
                                 f"السعر: {line.get('price', 'غير متوفر')} | "
                                 f"غرف: {line.get('Bedrooms', line.get('bedrooms','غير متوفر'))} | "
+                                f"حمام: {line.get('Bathrooms', line.get('bathrooms','غير متوفر'))}\n"
                             )
                     message = function_output.get('message', '')
                     follow_up = function_output.get('follow_up', '')
@@ -736,7 +696,7 @@ def chat():
                     cached_leads = _load_cache("leads_cache.json") or []
                     last_lead = next((l for l in cached_leads if str(l.get("user_id")) == str(user_id)), None)
                     if last_lead:
-                        for k in ["budget", "location", "property_type", "bedrooms"]:
+                        for k in ["budget", "location", "property_type", "bedrooms", "bathrooms"]:
                             if not merged_prefs.get(k) and last_lead.get(k):
                                 merged_prefs[k] = last_lead.get(k)
                 except Exception:
@@ -808,8 +768,36 @@ def chat():
                         "budget": merged_prefs.get("budget", 0),
                         "property_type": merged_prefs.get("property_type"),
                         "bedrooms": merged_prefs.get("bedrooms", 0),
+                        "bathrooms": merged_prefs.get("bathrooms", 0),
                         "compound": merged_prefs.get("compound_name", "")
                     }
+                    # Ask about area and installment years before searching (mandatory questions)
+                    _cont = False
+                    try:
+                        import re as _re
+                        _cont = bool(_re.search(r'(نكمل|كمل|من غير|بدون|continue|skip)', user_message or '', flags=_re.IGNORECASE))
+                    except Exception:
+                        _cont = False
+                    if (not search_args.get("apartment_area") or not search_args.get("installment_years")) and not _cont:
+                        bot_response = (
+                            "قبل ما أبدأ أبحث لك، ممكن تقولّي المساحة اللي تناسبك بالمتر؟ "
+                            "وكمان عدد سنوات التقسيط اللي تحبها؟ (مثلاً: المساحة 150 م²، التقسيط 8 سنين). "
+                            "لو تحب نكمل من غيرهم، قولّي نكمل وخلاص."
+                        )
+                        response_data = {"response": bot_response, "thread_id": thread_id}
+                        try:
+                            executor.submit(functions.create_lead, lead_data)
+                        except Exception as e:
+                            logging.warning(f"Background lead creation failed: {e}")
+                        try:
+                            executor.submit(functions.log_conversation_to_db, thread_id, user_id, user_message)
+                        except Exception as e:
+                            logging.warning(f"Background user conversation logging failed: {e}")
+                        try:
+                            executor.submit(functions.log_conversation_to_db, thread_id, "bot", bot_response)
+                        except Exception as e:
+                            logging.warning(f"Background bot response logging failed: {e}")
+                        return jsonify(response_data)
                     function_output = functions.property_search(search_args)
                     # Format like property_search branch if results exist
                     if function_output and function_output.get('results'):
@@ -868,6 +856,57 @@ def chat():
     except Exception as e:
         logging.error(f"Error generating response: {e}")
         return jsonify({"error": "Failed to generate response"}), 500
+
+@app.route("/chat/audio", methods=["POST"])
+def chat_audio():
+    """Accepts an audio file and returns its transcript.
+
+    - Expects multipart/form-data with field 'audio' or 'file' or 'voice'
+    - Optional form field 'thread_id' to pass through (not required)
+    - If audio is empty or transcription yields empty text, returns 204 No Content
+    """
+    try:
+        # Quick empty body check
+        try:
+            content_length = int(request.headers.get('Content-Length') or 0)
+            if content_length == 0:
+                return ('', 204)
+        except Exception:
+            pass
+
+        file = (
+            request.files.get('audio')
+            or request.files.get('file')
+            or request.files.get('voice')
+        )
+        if not file:
+            # Some clients send raw bytes directly
+            raw = request.get_data(cache=False, as_text=False)
+            if not raw:
+                return ('', 204)
+            mime_type = request.headers.get('Content-Type')
+            transcript = speech_utils.transcribe_audio(raw, mime_type)
+        else:
+            data = file.read() if hasattr(file, 'read') else None
+            if not data:
+                return ('', 204)
+            mime_type = getattr(file, 'mimetype', None) or request.headers.get('Content-Type')
+            transcript = speech_utils.transcribe_audio(data, mime_type)
+
+        if not transcript or not str(transcript).strip():
+            # Ignore empty audio or failed transcription: no noisy message
+            return ('', 204)
+
+        # Pass through optional thread_id for client convenience
+        thread_id = request.form.get('thread_id') or request.args.get('thread_id')
+        resp = {"transcript": transcript.strip()}
+        if thread_id:
+            resp["thread_id"] = thread_id
+        return jsonify(resp)
+    except Exception as e:
+        logging.error(f"/chat/audio error: {e}")
+        # Do not surface noisy errors to user; treat like empty audio
+        return ('', 204)
 
 # -------------------------------------------------------
 # Test endpoints
