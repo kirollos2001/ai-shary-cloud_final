@@ -5,29 +5,53 @@ from typing import Optional
 # Import variables for configuration
 import variables
 
-def transcribe_audio(audio_bytes: bytes, mime_type: Optional[str] = None) -> str:
-    """Transcribe audio bytes using Google Cloud Speech-to-Text v2.
-    
+def transcribe_audio(audio_input, mime_type: Optional[str] = None) -> str:
+    """Transcribe audio using Google Cloud Speech-to-Text v2.
+
     Handles audio files longer than 60 seconds by using streaming API.
+    Can accept either file path (str) or audio bytes.
 
     Args:
-        audio_bytes: Raw audio data.
+        audio_input: Either file path (str) or raw audio data (bytes).
         mime_type: MIME type of the audio (unused for auto-detect).
 
     Returns:
-        Transcript text from the audio. Returns empty string if transcription fails.
+        Transcript text from the audio. Returns error message if transcription fails.
     """
     try:
         from google.cloud import speech_v2
     except ImportError:
         logging.error("Google Cloud Speech-to-Text library not installed. Install with: pip install google-cloud-speech")
-        return ""
-    
+        return "[Audio transcription unavailable - Google Cloud Speech library not installed]"
+
+    # Handle both file path and audio bytes
+    if isinstance(audio_input, str):
+        # It's a file path
+        if not os.path.exists(audio_input):
+            logging.error(f"Audio file not found: {audio_input}")
+            return "[Audio transcription failed - file not found]"
+        
+        try:
+            with open(audio_input, 'rb') as f:
+                audio_bytes = f.read()
+            logging.info(f"Loaded audio file: {audio_input} ({len(audio_bytes)} bytes)")
+        except Exception as e:
+            logging.error(f"Failed to read audio file: {e}")
+            return "[Audio transcription failed - could not read file]"
+    else:
+        # It's already audio bytes
+        audio_bytes = audio_input
+
     project_id = variables.GOOGLE_CLOUD_PROJECT
     if not project_id:
         logging.error("GOOGLE_CLOUD_PROJECT is not configured")
-        return ""
+        return "[Audio transcription unavailable - Google Cloud project not configured]"
 
+    # Check if audio is too small (likely empty or very short)
+    if len(audio_bytes) < 1000:  # Less than 1KB is likely empty or very short
+        logging.info(f"Audio file too small ({len(audio_bytes)} bytes) - likely empty, returning empty transcript")
+        return ""
+    
     try:
         client = speech_v2.SpeechClient()
 
@@ -40,11 +64,15 @@ def transcribe_audio(audio_bytes: bytes, mime_type: Optional[str] = None) -> str
                 model="latest_long",
             )
         else:
-            # For other formats (WAV, etc.)
+            # For other formats (WAV, MP3, etc.) - use auto-detection
             config = speech_v2.RecognitionConfig(
                 auto_decoding_config=speech_v2.AutoDetectDecodingConfig(),
                 language_codes=[variables.SPEECH_LANGUAGE],
                 model="latest_long",
+                features=speech_v2.RecognitionFeatures(
+                    enable_automatic_punctuation=True,
+                    enable_word_time_offsets=True,
+                ),
             )
 
         # Check if audio is too long (estimate based on size)
@@ -61,7 +89,7 @@ def transcribe_audio(audio_bytes: bytes, mime_type: Optional[str] = None) -> str
         logging.error(f"Transcription request failed: {e}")
         logging.error(f"Project ID: {project_id}")
         logging.error(f"Language: {variables.SPEECH_LANGUAGE}")
-        return ""
+        return "[Audio transcription failed - please try again or use text input]"
 
 def _transcribe_short_audio(client, project_id, config, audio_bytes):
     """Transcribe short audio files (< 60 seconds)"""
@@ -86,7 +114,7 @@ def _transcribe_short_audio(client, project_id, config, audio_bytes):
         return transcript
     except Exception as e:
         logging.error(f"Short audio transcription failed: {e}")
-        return ""
+        return "[Audio transcription failed - please try again or use text input]"
 
 def _transcribe_long_audio(client, project_id, config, audio_bytes):
     """Transcribe long audio files (> 60 seconds) using streaming"""
@@ -105,4 +133,4 @@ def _transcribe_long_audio(client, project_id, config, audio_bytes):
         
     except Exception as e:
         logging.error(f"Long audio transcription failed: {e}")
-        return ""
+        return "[Audio transcription failed - please try again or use text input]"
