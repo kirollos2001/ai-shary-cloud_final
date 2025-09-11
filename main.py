@@ -62,15 +62,24 @@ except FileNotFoundError:
     pass
 
 # -------------------------------------------------------
-# Set Google Cloud credentials for local development
+# Set Google Cloud credentials from variables.py
 # -------------------------------------------------------
 if not os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
-    credentials_path = os.path.join(os.path.dirname(__file__), 'shary_ai_agent_cred.json')
-    if os.path.exists(credentials_path):
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
-        logging.info(f"✅ Set Google Cloud credentials: {credentials_path}")
-    else:
-        logging.warning("⚠️ Google Cloud credentials file not found - audio transcription may not work")
+    try:
+        import json
+        import tempfile
+        
+        # Create a temporary credentials file from variables.py
+        credentials_dict = variables.GOOGLE_CLOUD_CREDENTIALS
+        temp_credentials_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+        json.dump(credentials_dict, temp_credentials_file, indent=2)
+        temp_credentials_file.close()
+        
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_credentials_file.name
+        logging.info(f"✅ Set Google Cloud credentials from variables.py: {temp_credentials_file.name}")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to set Google Cloud credentials from variables.py: {e}")
+        logging.warning("⚠️ Audio transcription may not work")
 
 # -------------------------------------------------------
 # Logging
