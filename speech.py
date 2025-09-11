@@ -47,12 +47,24 @@ def transcribe_audio(audio_input, mime_type: Optional[str] = None) -> str:
         logging.error("GOOGLE_CLOUD_PROJECT is not configured")
         return "[Audio transcription unavailable - Google Cloud project not configured]"
 
-    # Check if audio is too small (likely empty or very short)
-    if len(audio_bytes) < 1000:  # Less than 1KB is likely empty or very short
-        logging.info(f"Audio file too small ({len(audio_bytes)} bytes) - likely empty, returning empty transcript")
-        return ""
-    
     try:
+        # Set up credentials from variables.py if not already set
+        if not os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
+            try:
+                import json
+                import tempfile
+                
+                # Create a temporary credentials file from variables.py
+                credentials_dict = variables.GOOGLE_CLOUD_CREDENTIALS
+                temp_credentials_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+                json.dump(credentials_dict, temp_credentials_file, indent=2)
+                temp_credentials_file.close()
+                
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_credentials_file.name
+                logging.info(f"✅ Set Google Cloud credentials from variables.py for speech: {temp_credentials_file.name}")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to set Google Cloud credentials from variables.py for speech: {e}")
+        
         client = speech_v2.SpeechClient()
 
         # Handle different audio formats properly
