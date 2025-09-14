@@ -15,6 +15,22 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 # فلاج لتعطيل أي عمليات DB مؤقتًا (أثناء النشر الأول/التجربة)
 SKIP_DB_INIT = os.getenv("SKIP_DB_INIT") == "1"
 
+def _log_cache_length(filename):
+    """Log the number of items stored in a cache file."""
+    fpath = os.path.join(CACHE_DIR, filename)
+    if os.path.exists(fpath):
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            logging.info("Cache %s length: %s", filename, len(data))
+        except Exception as e:
+            logging.error("Failed to read %s: %s", fpath, e)
+    else:
+        logging.warning("%s not found at %s", filename, fpath)
+
+_log_cache_length("units.json")
+_log_cache_length("new_launches.json")
+
 def _db_config_ok():
     """تأكد من توفر مفاتيح الـDB الأساسية قبل أي اتصال"""
     required = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]
@@ -346,3 +362,4 @@ def sync_conversations_to_db():
 
     save_to_cache("conversations_updates.json", [])
     logging.info(f"✅ Synced {len(convos)} conversations to DB and cleared conversations_updates.json")
+
