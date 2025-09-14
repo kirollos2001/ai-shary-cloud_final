@@ -210,6 +210,10 @@ GOOGLE_PROJECT_ID = (
 # Expose it as an alias to the resolved project id above
 GOOGLE_CLOUD_PROJECT = GOOGLE_PROJECT_ID
 
+# Speech
+SPEECH_LANGUAGE = _get_str_env("SPEECH_LANGUAGE") or _get_str_env("SPEECH_TO_TEXT_LANGUAGE", "ar-EG")
+
+def get_google_sa_credentials(scopes: Optional[List[str]] = None):
 
 def get_google_sa_credentials(scopes: Optional[List[str]] = None):
     """Return google.oauth2.service_account.Credentials if SA JSON is available.
@@ -285,4 +289,5 @@ LOG_LEVEL = _get_str_env("LOG_LEVEL", "INFO")
 for name, val in [("DB_NAME", DB_NAME), ("DB_USER", DB_USER), ("DB_PASSWORD", DB_PASSWORD)]:
     if not val:
         _warn(f"{name} is not set; DB connections may fail later.")
+
 
