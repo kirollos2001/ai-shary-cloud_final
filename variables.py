@@ -219,8 +219,6 @@ GOOGLE_CLOUD_PROJECT = GOOGLE_PROJECT_ID
 SPEECH_LANGUAGE = _get_str_env("SPEECH_LANGUAGE") or _get_str_env("SPEECH_TO_TEXT_LANGUAGE", "ar-EG")
 
 def get_google_sa_credentials(scopes: Optional[List[str]] = None):
-
-def get_google_sa_credentials(scopes: Optional[List[str]] = None):
     """Return google.oauth2.service_account.Credentials if SA JSON is available.
        Otherwise try ADC (useful on Cloud Run with attached service account).
        Returns None if nothing configured.
@@ -299,5 +297,6 @@ SESSION_TIMEOUT = _get_int_env("SESSION_TIMEOUT", 3600)
 
 # Logging
 LOG_LEVEL = _get_str_env("LOG_LEVEL", "INFO")
+
 
 
