@@ -206,6 +206,11 @@ GOOGLE_PROJECT_ID = (
     or (GOOGLE_CLOUD_CREDENTIALS.get("project_id") if isinstance(GOOGLE_CLOUD_CREDENTIALS, dict) else None)
 )
 
+# Backwards compatibility: some modules expect GOOGLE_CLOUD_PROJECT
+# Expose it as an alias to the resolved project id above
+GOOGLE_CLOUD_PROJECT = GOOGLE_PROJECT_ID
+
+
 def get_google_sa_credentials(scopes: Optional[List[str]] = None):
     """Return google.oauth2.service_account.Credentials if SA JSON is available.
        Otherwise try ADC (useful on Cloud Run with attached service account).
@@ -280,3 +285,4 @@ LOG_LEVEL = _get_str_env("LOG_LEVEL", "INFO")
 for name, val in [("DB_NAME", DB_NAME), ("DB_USER", DB_USER), ("DB_PASSWORD", DB_PASSWORD)]:
     if not val:
         _warn(f"{name} is not set; DB connections may fail later.")
+
