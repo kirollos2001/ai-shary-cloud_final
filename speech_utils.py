@@ -49,19 +49,18 @@ def transcribe_audio(audio_input, mime_type: Optional[str] = None) -> str:
 
     try:
         # Set up credentials from variables.py if not already set
-        if not os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
+        if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
             try:
                 import json
                 import tempfile
                 
-                # Create a temporary credentials file from variables.py
                 credentials_dict = variables.GOOGLE_CLOUD_CREDENTIALS
-                temp_credentials_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
-                json.dump(credentials_dict, temp_credentials_file, indent=2)
-                temp_credentials_file.close()
-                
-                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_credentials_file.name
-                logging.info(f"✅ Set Google Cloud credentials from variables.py for speech: {temp_credentials_file.name}")
+                if isinstance(credentials_dict, dict):
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as temp_credentials_file:
+                        json.dump(credentials_dict, temp_credentials_file, indent=2)
+                        temp_name = temp_credentials_file.name
+                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_name
+                    logging.info(f"✅ Set Google Cloud credentials from variables.py for speech: {temp_name}")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to set Google Cloud credentials from variables.py for speech: {e}")
         
