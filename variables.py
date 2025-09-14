@@ -191,7 +191,11 @@ def _get_secret_or_env(value_env: str, secret_env: str | None = None, default: s
         return v
     sname = _get_str_env(secret_env or f"{value_env}_SECRET")
     if sname:
-        return _fetch_secret(sname)
+        val = _fetch_secret(sname)
+        if val is not None:
+            logging.warning(f"{value_env} loaded from Secret Manager secret {sname}")
+            return val
+        logging.warning(f"Failed to load {value_env} from Secret Manager secret {sname}")
     return default
 
 # -----------------------------------------------------------------------------
@@ -249,10 +253,20 @@ GEMINI_MODEL_NAME = "gemini-2.5-flash"
 # Database (recommend putting these in secrets)
 DB_HOST = _get_str_env("DB_HOST", "77.37.35.26")
 DB_PORT = _get_int_env("DB_PORT", 3306)
+_DB_ENV_RAW = {n: _get_str_env(n) for n in ("DB_NAME", "DB_USER", "DB_PASSWORD")}
 DB_NAME = _get_secret_or_env("DB_NAME")  # prefers ENV DB_NAME else DB_NAME_SECRET
 DB_USER = _get_secret_or_env("DB_USER")
 DB_PASSWORD = _get_secret_or_env("DB_PASSWORD")
 
+for n, env_val, val in [
+    ("DB_NAME", _DB_ENV_RAW["DB_NAME"], DB_NAME),
+    ("DB_USER", _DB_ENV_RAW["DB_USER"], DB_USER),
+    ("DB_PASSWORD", _DB_ENV_RAW["DB_PASSWORD"], DB_PASSWORD),
+]:
+    if val and env_val is None and _get_str_env(f"{n}_SECRET"):
+        logging.warning(f"{n} retrieved from Secret Manager")
+    if not val:
+        _warn(f"{n} is not set; DB connections may fail later.")
 # Email (also good candidates for secrets)
 EMAIL_HOST = _get_str_env("EMAIL_HOST", "smtp.gmail.com")
 EMAIL_PORT = _get_int_env("EMAIL_PORT", 587)
@@ -285,11 +299,5 @@ SESSION_TIMEOUT = _get_int_env("SESSION_TIMEOUT", 3600)
 
 # Logging
 LOG_LEVEL = _get_str_env("LOG_LEVEL", "INFO")
-
-# Warnings for missing DB vars
-for name, val in [("DB_NAME", DB_NAME), ("DB_USER", DB_USER), ("DB_PASSWORD", DB_PASSWORD)]:
-    if not val:
-        _warn(f"{name} is not set; DB connections may fail later.")
-
 
 
