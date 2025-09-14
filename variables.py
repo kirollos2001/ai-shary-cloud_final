@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import base64
+import logging
 from typing import Optional, Dict, Any, List
 
 def _warn(msg: str) -> None:
@@ -289,5 +290,6 @@ LOG_LEVEL = _get_str_env("LOG_LEVEL", "INFO")
 for name, val in [("DB_NAME", DB_NAME), ("DB_USER", DB_USER), ("DB_PASSWORD", DB_PASSWORD)]:
     if not val:
         _warn(f"{name} is not set; DB connections may fail later.")
+
 
 
