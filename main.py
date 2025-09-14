@@ -65,27 +65,32 @@ except FileNotFoundError:
 # Set Google Cloud credentials from variables.py
 # -------------------------------------------------------
 if not os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
-    try:
-        import json
-        import tempfile
-        
-        # Create a temporary credentials file from variables.py
-        credentials_dict = variables.GOOGLE_CLOUD_CREDENTIALS
-        temp_credentials_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
-        json.dump(credentials_dict, temp_credentials_file, indent=2)
-        temp_credentials_file.close()
-        
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_credentials_file.name
-        logging.info(f"✅ Set Google Cloud credentials from variables.py: {temp_credentials_file.name}")
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to set Google Cloud credentials from variables.py: {e}")
-        logging.warning("⚠️ Audio transcription may not work")
+    credentials_dict = variables.GOOGLE_CLOUD_CREDENTIALS
+    if isinstance(credentials_dict, dict):
+        try:
+            import json
+            import tempfile
 
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_credentials_file:
+                json.dump(credentials_dict, temp_credentials_file, indent=2)
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_credentials_file.name
+            logging.info(f"✅ Set Google Cloud credentials from variables.py: {temp_credentials_file.name}")
+        except Exception as e:
+            logging.warning(f"⚠️ Failed to set Google Cloud credentials from variables.py: {e}")
+            logging.warning("⚠️ Audio transcription may not work")
+    else:
+        logging.warning("⚠️ GOOGLE_CLOUD_CREDENTIALS not configured; relying on default credentials")
 # -------------------------------------------------------
 # Logging
 # -------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
-
+# Verify database connectivity early
+try:
+    _conn = config.get_db_connection()
+    _conn.close()
+    logging.info("✅ Database connection established")
+except Exception as e:
+    logging.warning(f"⚠️ Database connection failed: {e}")
 # -------------------------------------------------------
 # Flask App
 # -------------------------------------------------------
