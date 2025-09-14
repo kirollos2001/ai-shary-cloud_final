@@ -1092,6 +1092,15 @@ def validate_environment_for_cloud():
 # Environment + Chroma init
 env_valid = validate_environment_for_cloud()
 cache_initialized = initialize_caches_for_cloud()  # Run even if Chroma fails; app can work with limited features
+if cache_initialized:
+    try:
+        units_count = len(Cache_code.load_from_cache("units.json"))
+        launches_count = len(Cache_code.load_from_cache("new_launches.json"))
+        logging.info(
+            f"📦 Cache contains {units_count} units and {launches_count} new launches"
+        )
+    except Exception as e:
+        logging.warning(f"⚠️ Could not read cache counts: {e}")
 if env_valid:
     chromadb_initialized = initialize_chromadb_for_cloud()
     if not chromadb_initialized:
