@@ -12,8 +12,10 @@ CACHE_DIR = "cache"
 # إنشاء الفولدر بأمان حتى مع تعدد الـworkers (race-safe)
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# فلاج لتعطيل أي عمليات DB مؤقتًا (أثناء النشر الأول/التجربة)
-SKIP_DB_INIT = os.getenv("SKIP_DB_INIT") == "1"
+# Flag to temporarily skip any DB operations (disabled by default)
+# Previously controlled via SKIP_DB_INIT env var; now always False
+SKIP_DB_INIT = False
+
 
 def _log_cache_length(filename):
     """Log the number of items stored in a cache file."""
@@ -362,4 +364,5 @@ def sync_conversations_to_db():
 
     save_to_cache("conversations_updates.json", [])
     logging.info(f"✅ Synced {len(convos)} conversations to DB and cleared conversations_updates.json")
+
 
