@@ -287,8 +287,8 @@ class RealEstateRAG:
     
     def load_cache_data(self) -> tuple:
         try:
-            units_path = os.path.join("cache", "units.json")
-            new_launches_path = os.path.join("cache", "new_launches.json")
+            units_path = os.path.join(variables.CACHE_DIR, "units.json")
+            new_launches_path = os.path.join(variables.CACHE_DIR, "new_launches.json")
             units_data = []
             new_launches_data = []
             if os.path.exists(units_path):
