@@ -4,12 +4,12 @@ import logging
 import time
 import tempfile
 from filelock import FileLock
+from variables import CACHE_DIR
 
 # ملاحظة: بلاش import من config/db_operations على مستوى الملف لتجنب circular imports
 # هنستورد جوّه الدوال بس عند الحاجة.
 
-CACHE_DIR = "cache"
-# إنشاء الفولدر بأمان حتى مع تعدد الـworkers (race-safe)
+# Ensure the cache directory exists at runtime
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Flag to temporarily skip any DB operations (disabled by default)
@@ -364,5 +364,6 @@ def sync_conversations_to_db():
 
     save_to_cache("conversations_updates.json", [])
     logging.info(f"✅ Synced {len(convos)} conversations to DB and cleared conversations_updates.json")
+
 
 
