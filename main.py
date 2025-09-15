@@ -1072,10 +1072,21 @@ def initialize_chromadb_for_cloud():
         logging.info("🔄 Storing new launches in ChromaDB with embeddings...")
         rag.store_new_launches_in_chroma(new_launches_data)
         stats = rag.get_collection_stats()
-        logging.info(f"✅ ChromaDB initialization complete! Collection stats: {stats}")
+        logging.info(
+            "✅ ChromaDB initialization complete! "
+            f"Units stored: {stats.get('units_count', 0)}, "
+            f"New launches stored: {stats.get('new_launches_count', 0)}, "
+            f"Total: {stats.get('total_count', 0)}"
+        )
         return True
     except Exception as e:
         logging.error(f"❌ Error initializing ChromaDB for cloud deployment: {e}")
+        if 'rag' in locals():
+            try:
+                stats = rag.get_collection_stats()
+                logging.info(f"ℹ️ ChromaDB collection stats at failure: {stats}")
+            except Exception as stats_error:
+                logging.warning(f"⚠️ Unable to read ChromaDB stats after failure: {stats_error}")
         return False
 
 def validate_environment_for_cloud():
