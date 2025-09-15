@@ -8,7 +8,7 @@ import sqlite3
 import google.generativeai as genai
 import numpy as np
 import variables
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from chromadb.config import Settings
 # Configure Gemini API
 os.environ["GEMINI_API_KEY"] = variables.GEMINI_API_KEY
@@ -81,6 +81,7 @@ class RealEstateRAG:
     def __init__(self, persist_directory: str = "./chroma_db"):
         self.persist_directory = persist_directory
         chroma_settings = Settings(anonymized_telemetry=False, allow_reset=True)
+        self._chroma_settings = chroma_settings
         self.client = chromadb.PersistentClient(path=persist_directory, settings=chroma_settings)
         self.embedder = GeminiEmbeddingFunction(variables.GEMINI_API_KEY)
         # Cache for query embeddings to avoid regeneration
@@ -92,8 +93,18 @@ class RealEstateRAG:
         except Exception as e:
             err_msg = str(e)
             logger.error(f"Error creating collections: {err_msg}")
-            if isinstance(e, sqlite3.OperationalError) or "no such column: collections.topic" in err_msg:
-                logger.warning("Detected ChromaDB schema mismatch. Attempting automatic reset...")
+            err_msg_lower = err_msg.lower()
+            if (
+                isinstance(e, sqlite3.OperationalError)
+                or "no such column: collections.topic" in err_msg_lower
+                or "embeddings_queue" in err_msg_lower
+            ):
+                if "embeddings_queue" in err_msg_lower:
+                    logger.warning(
+                        "Detected ChromaDB embeddings queue conflict. Attempting automatic reset..."
+                    )
+                else:
+                    logger.warning("Detected ChromaDB schema mismatch. Attempting automatic reset...")
                 self._reset_chroma_storage(chroma_settings)
                 self._create_or_get_collections()
             else:
@@ -260,7 +271,20 @@ class RealEstateRAG:
             metadata={"description": "New property launches data for RAG"},
             embedding_function=self.embedder
         )
-    
+    def _get_collection_count(self, collection, collection_name: str) -> Optional[int]:
+        """Safely obtain a collection count while logging any issues."""
+        try:
+            return collection.count()
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Could not determine {collection_name} collection count: {e}"
+            )
+            return None
+
+    def _is_embeddings_queue_conflict(self, error: Exception) -> bool:
+        """Check if the exception is due to an embeddings queue schema conflict."""
+        message = str(error).lower()
+        return "embeddings_queue" in message and "already exists" in message    
     def _reset_chroma_storage(self, chroma_settings: Settings):
         """Reset persistent storage to recover from schema mismatches.
     
@@ -405,7 +429,7 @@ Address: {city_name}
             metadatas.append(metadata)
             ids.append(f"launch_{launch.get('id', 'unknown')}")
         return documents, metadatas, ids
-    def store_units_in_chroma(self, units_data: List[Dict]):
+    def store_units_in_chroma(self, units_data: List[Dict], retry_on_conflict: bool = True):
         if not units_data:
             logger.warning("⚠️ No units data to store")
             return
@@ -415,13 +439,41 @@ Address: {city_name}
             {k: v for k, v in m.items() if k in ['new_image', 'unit_id', 'price_value', 'bedrooms', 'bathrooms', 'apartment_area', 'installment_years', 'delivery_in']}
             for m in metadatas
         ]
+        before_count = self._get_collection_count(self.units_collection, "real_estate_units")
         try:
             # Add documents without manually deleting (let ChromaDB handle duplicates)
             self.units_collection.add(documents=documents, metadatas=metadatas, ids=ids)
-            logger.info(f"✅ Successfully stored {len(units_data)} units in ChromaDB")
+            after_count = self._get_collection_count(self.units_collection, "real_estate_units")
+            if after_count is not None:
+                if before_count is not None:
+                    added = after_count - before_count
+                    if added != len(units_data):
+                        logger.warning(
+                            f"⚠️ Expected to add {len(units_data)} units but collection count changed by {added}. Total now {after_count}."
+                        )
+                    else:
+                        logger.info(
+                            f"✅ Successfully stored {len(units_data)} units in ChromaDB (total now {after_count})"
+                        )
+                else:
+                    logger.info(
+                        f"✅ Stored {len(units_data)} units in ChromaDB (current total {after_count}; previous count unavailable)"
+                    )
+            else:
+                logger.info(
+                    f"✅ Stored {len(units_data)} units in ChromaDB (total count unavailable)"
+                )
         except Exception as e:
+            if retry_on_conflict and self._is_embeddings_queue_conflict(e):
+                logger.warning(
+                    "Detected embeddings queue conflict while storing units. Resetting ChromaDB storage and retrying once..."
+                )
+                self._reset_chroma_storage(self._chroma_settings)
+                self._create_or_get_collections()
+                self.store_units_in_chroma(units_data, retry_on_conflict=False)
+                return
             logger.error(f"❌ Error storing units in ChromaDB: {e}")
-    def store_new_launches_in_chroma(self, new_launches_data: List[Dict]):
+    def store_new_launches_in_chroma(self, new_launches_data: List[Dict], retry_on_conflict: bool = True):
         if not new_launches_data:
             logger.warning("⚠️ No new launches data to store")
             return
@@ -431,11 +483,39 @@ Address: {city_name}
             {k: v for k, v in m.items() if k in ['new_image', 'launch_id', 'id', 'name', 'property_type_name', 'city_name']}
             for m in metadatas
         ]
+        before_count = self._get_collection_count(self.new_launches_collection, "new_launches")
         try:
             # Add documents without manually deleting (let ChromaDB handle duplicates)
             self.new_launches_collection.add(documents=documents, metadatas=metadatas, ids=ids)
-            logger.info(f"✅ Successfully stored {len(new_launches_data)} new launches in ChromaDB")
+            after_count = self._get_collection_count(self.new_launches_collection, "new_launches")
+            if after_count is not None:
+                if before_count is not None:
+                    added = after_count - before_count
+                    if added != len(new_launches_data):
+                        logger.warning(
+                            f"⚠️ Expected to add {len(new_launches_data)} new launches but collection count changed by {added}. Total now {after_count}."
+                        )
+                    else:
+                        logger.info(
+                            f"✅ Successfully stored {len(new_launches_data)} new launches in ChromaDB (total now {after_count})"
+                        )
+                else:
+                    logger.info(
+                        f"✅ Stored {len(new_launches_data)} new launches in ChromaDB (current total {after_count}; previous count unavailable)"
+                    )
+            else:
+                logger.info(
+                    f"✅ Stored {len(new_launches_data)} new launches in ChromaDB (total count unavailable)"
+                )
         except Exception as e:
+            if retry_on_conflict and self._is_embeddings_queue_conflict(e):
+                logger.warning(
+                    "Detected embeddings queue conflict while storing new launches. Resetting ChromaDB storage and retrying once..."
+                )
+                self._reset_chroma_storage(self._chroma_settings)
+                self._create_or_get_collections()
+                self.store_new_launches_in_chroma(new_launches_data, retry_on_conflict=False)
+                return
             logger.error(f"❌ Error storing new launches in ChromaDB: {e}")
     def get_collection_stats(self) -> Dict[str, int]:
         """Get statistics about the collections"""
