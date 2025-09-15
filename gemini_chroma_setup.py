@@ -152,7 +152,7 @@ class RealEstateRAGWithGemini:
         """Load data from cache files"""
         try:
             # Load units data
-            units_path = os.path.join("cache", "units.json")
+            units_path = os.path.join(variables.CACHE_DIR, "units.json")
             if os.path.exists(units_path):
                 with open(units_path, 'r', encoding='utf-8') as f:
                     units_data = json.load(f)
@@ -162,7 +162,7 @@ class RealEstateRAGWithGemini:
                 logger.warning("⚠️ units.json not found in cache directory")
 
             # Load new launches data
-            new_launches_path = os.path.join("cache", "new_launches.json")
+            new_launches_path = os.path.join(variables.CACHE_DIR, "new_launches.json")
             if os.path.exists(new_launches_path):
                 with open(new_launches_path, 'r', encoding='utf-8') as f:
                     new_launches_data = json.load(f)
