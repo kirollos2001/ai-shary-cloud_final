@@ -4,6 +4,7 @@ import sys
 import json
 import base64
 import logging
+import tempfile
 from typing import Optional, Dict, Any, List
 
 def _warn(msg: str) -> None:
@@ -276,7 +277,8 @@ TEAM_EMAIL = _get_str_env("TEAM_EMAIL")
 USER_INFO_API_URL = _get_str_env("USER_INFO_API_URL", "https://shary.eg/api/UserInfo")
 
 # Cache
-CACHE_DIR = "cache/"
+CACHE_DIR = os.path.join(tempfile.gettempdir(), "cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
 LEADS_CACHE_FILE = "leads_cache.json"
 CONVERSATIONS_CACHE_FILE = "conversations_cache.json"
 UNITS_CACHE_FILE = "units.json"
@@ -297,6 +299,7 @@ SESSION_TIMEOUT = _get_int_env("SESSION_TIMEOUT", 3600)
 
 # Logging
 LOG_LEVEL = _get_str_env("LOG_LEVEL", "INFO")
+
 
 
 
