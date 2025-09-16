@@ -78,12 +78,17 @@ logger = logging.getLogger(__name__)
 # Singleton cache for RAG instance
 _rag_instance = None
 class RealEstateRAG:
-    def __init__(self, persist_directory: str = variables.CHROMA_PERSIST_DIR):
+    def __init__(self, persist_directory: str = os.environ.get('CHROMA_PERSIST_DIRECTORY', variables.CHROMA_PERSIST_DIR or '/tmp/chroma_db')):
         self.persist_directory = persist_directory
-        os.makedirs(self.persist_directory, exist_ok=True)
         chroma_settings = Settings(anonymized_telemetry=False, allow_reset=True)
         self._chroma_settings = chroma_settings
-        self.client = chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+        
+        # Always reset storage first to avoid conflicts
+        self._reset_chroma_storage(chroma_settings)
+        
+        # Use recovery method to create client
+        self.client = self._create_client_with_recovery(chroma_settings)
+        
         self.embedder = GeminiEmbeddingFunction(variables.GEMINI_API_KEY)
         # Cache for query embeddings to avoid regeneration
         self._query_embedding_cache = {}
@@ -300,21 +305,35 @@ class RealEstateRAG:
     def _create_client_with_recovery(self, chroma_settings: Settings):
         """Create a persistent Chroma client with automatic recovery from schema conflicts."""
         try:
-            return chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+            client = chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+            self.client = client
+            return client
+        except sqlite3.OperationalError as e:  # Target OperationalError specifically
+            err_msg = str(e).lower()
+            if "already exists" in err_msg or "embeddings_queue" in err_msg:
+                logger.warning("Detected embeddings_queue conflict. Resetting storage...")
+                self._reset_chroma_storage(chroma_settings, skip_client_reset=True)
+                client = chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+                self.client = client
+                return client
+            else:
+                raise
         except Exception as error:
             if self._should_reset_for_client_error(error):
                 logger.warning(
                     "Detected ChromaDB persistence conflict during client creation. Resetting storage directory and retrying..."
                 )
                 self._reset_chroma_storage(chroma_settings, skip_client_reset=True)
-                return self.client
+                client = chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+                self.client = client
+                return client
             raise
 
     def _reset_chroma_storage(self, chroma_settings: Settings, skip_client_reset: bool = False):
         """Reset persistent storage to recover from schema mismatches.
     
         1) Try client.reset() if allowed.
-        2) Backup existing directory and recreate a fresh one.
+        2) Delete existing directory and recreate a fresh one.
         """
         # Try logical reset first
         try:
@@ -323,17 +342,18 @@ class RealEstateRAG:
         except Exception:
             pass
     
-        # Backup existing directory and recreate
+        # Delete existing directory and recreate
         try:
             if os.path.isdir(self.persist_directory):
-                backup_dir = f"{self.persist_directory}_backup_{int(time.time())}"
-                shutil.move(self.persist_directory, backup_dir)
-        except Exception:
-            pass
+                shutil.rmtree(self.persist_directory)
+                logger.info(f"🗑️ Deleted existing ChromaDB directory: {self.persist_directory}")
+        except Exception as e:
+            logger.warning(f"⚠️ Error deleting ChromaDB directory: {e}")
     
         os.makedirs(self.persist_directory, exist_ok=True)
         try:
             self.client = chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+            logger.info("✅ Recreated fresh ChromaDB client")
         except Exception as error:
             logger.error(f"❌ Failed to recreate ChromaDB client after reset: {error}")
             raise
@@ -472,6 +492,8 @@ Address: {city_name}
         try:
             # Add documents without manually deleting (let ChromaDB handle duplicates)
             self.units_collection.add(documents=documents, metadatas=metadatas, ids=ids)
+            if hasattr(self.client, 'persist'):
+                self.client.persist()
             after_count = self._get_collection_count(self.units_collection, "real_estate_units")
             if after_count is not None:
                 if before_count is not None:
@@ -516,6 +538,8 @@ Address: {city_name}
         try:
             # Add documents without manually deleting (let ChromaDB handle duplicates)
             self.new_launches_collection.add(documents=documents, metadatas=metadatas, ids=ids)
+            if hasattr(self.client, 'persist'):
+                self.client.persist()
             after_count = self._get_collection_count(self.new_launches_collection, "new_launches")
             if after_count is not None:
                 if before_count is not None:
