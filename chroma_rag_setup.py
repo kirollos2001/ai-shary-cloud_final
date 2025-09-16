@@ -284,8 +284,32 @@ class RealEstateRAG:
     def _is_embeddings_queue_conflict(self, error: Exception) -> bool:
         """Check if the exception is due to an embeddings queue schema conflict."""
         message = str(error).lower()
-        return "embeddings_queue" in message and "already exists" in message    
-    def _reset_chroma_storage(self, chroma_settings: Settings):
+        return "embeddings_queue" in message and "already exists" in message
+
+    def _should_reset_for_client_error(self, error: Exception) -> bool:
+        """Determine if a Chroma client error should trigger a persistence reset."""
+        message = str(error).lower()
+        if "embeddings_queue" in message:
+            return True
+        if isinstance(error, sqlite3.OperationalError):
+            conflict_markers = ["already exists", "duplicate column", "no such column"]
+            return any(marker in message for marker in conflict_markers)
+        return False
+
+    def _create_client_with_recovery(self, chroma_settings: Settings):
+        """Create a persistent Chroma client with automatic recovery from schema conflicts."""
+        try:
+            return chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+        except Exception as error:
+            if self._should_reset_for_client_error(error):
+                logger.warning(
+                    "Detected ChromaDB persistence conflict during client creation. Resetting storage directory and retrying..."
+                )
+                self._reset_chroma_storage(chroma_settings, skip_client_reset=True)
+                return self.client
+            raise
+
+    def _reset_chroma_storage(self, chroma_settings: Settings, skip_client_reset: bool = False):
         """Reset persistent storage to recover from schema mismatches.
     
         1) Try client.reset() if allowed.
@@ -293,7 +317,7 @@ class RealEstateRAG:
         """
         # Try logical reset first
         try:
-            if hasattr(self.client, "reset"):
+            if not skip_client_reset and getattr(self, "client", None) is not None and hasattr(self.client, "reset"):
                 self.client.reset()
         except Exception:
             pass
@@ -307,7 +331,11 @@ class RealEstateRAG:
             pass
     
         os.makedirs(self.persist_directory, exist_ok=True)
-        self.client = chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+        try:
+            self.client = chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
+        except Exception as error:
+            logger.error(f"❌ Failed to recreate ChromaDB client after reset: {error}")
+            raise
     
     def load_cache_data(self) -> tuple:
         try:
