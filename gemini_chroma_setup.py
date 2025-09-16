@@ -83,7 +83,7 @@ def clean_metadata(metadata):
     return {k: (v if v is not None else "") for k, v in metadata.items()}
 
 class RealEstateRAGWithGemini:
-    def __init__(self, gemini_api_key: str, persist_directory: str = "./chroma_db_gemini"):
+    def __init__(self, gemini_api_key: str, persist_directory: str = variables.CHROMA_PERSIST_DIR):
         """
         Initialize ChromaDB with Gemini embeddings
         
@@ -92,13 +92,14 @@ class RealEstateRAGWithGemini:
             persist_directory: Directory to store ChromaDB data
         """
         self.persist_directory = persist_directory
+        os.makedirs(self.persist_directory, exist_ok=True)
         self.gemini_api_key = gemini_api_key
         
         # Initialize Gemini embedding function
         self.embedding_function = GeminiEmbeddingFunction(gemini_api_key)
         
         # Initialize ChromaDB client with Gemini embeddings
-        self.client = chromadb.PersistentClient(path=persist_directory)
+        self.client = chromadb.PersistentClient(path=self.persist_directory)
         
         # Create collections with Gemini embeddings
         self.units_collection = self.client.get_or_create_collection(
