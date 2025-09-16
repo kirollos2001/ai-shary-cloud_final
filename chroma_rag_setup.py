@@ -78,11 +78,12 @@ logger = logging.getLogger(__name__)
 # Singleton cache for RAG instance
 _rag_instance = None
 class RealEstateRAG:
-    def __init__(self, persist_directory: str = "./chroma_db"):
+    def __init__(self, persist_directory: str = variables.CHROMA_PERSIST_DIR):
         self.persist_directory = persist_directory
+        os.makedirs(self.persist_directory, exist_ok=True)
         chroma_settings = Settings(anonymized_telemetry=False, allow_reset=True)
         self._chroma_settings = chroma_settings
-        self.client = chromadb.PersistentClient(path=persist_directory, settings=chroma_settings)
+        self.client = chromadb.PersistentClient(path=self.persist_directory, settings=chroma_settings)
         self.embedder = GeminiEmbeddingFunction(variables.GEMINI_API_KEY)
         # Cache for query embeddings to avoid regeneration
         self._query_embedding_cache = {}
