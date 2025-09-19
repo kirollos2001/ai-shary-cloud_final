@@ -16,6 +16,7 @@ langchain-google-genai==0.0.11
 # Google Cloud Speech-to-Text
 google-cloud-speech==2.26.0
 google-cloud-secret-manager==2.24.0
+google-cloud-storage==2.18.2
 
 # DB & Vectors
 mysql-connector-python==9.0.0
