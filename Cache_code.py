@@ -5,14 +5,27 @@ import time
 import tempfile
 from filelock import FileLock
 from variables import CACHE_DIR
-from google.cloud import storage
-from google.cloud.exceptions import NotFound
 
+_GCS_IMPORT_ERROR = None
+
+try:
+    from google.cloud import storage
+except ImportError as exc:  # pragma: no cover - depends on optional dependency
+    storage = None  # type: ignore[assignment]
+    _GCS_IMPORT_ERROR = exc
 # =========================
 # Logging
 # =========================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# If the optional google-cloud-storage dependency is missing, surface a clear warning
+if _GCS_IMPORT_ERROR:
+    logger.warning(
+        "⚠️ google-cloud-storage is not installed: %s. "
+        "Cache uploads to Google Cloud Storage will be skipped.",
+        _GCS_IMPORT_ERROR,
+    )
 
 # =========================
 # Google Cloud Storage Configuration
@@ -21,13 +34,18 @@ GCS_BUCKET_NAME = "sharyai2025-cache"
 GCS_CACHE_PREFIX = "cache/"  # Path in GCS where cache files are stored
 
 # Initialize GCS client
-try:
-    gcs_client = storage.Client()
-    gcs_bucket = gcs_client.bucket(GCS_BUCKET_NAME)
-    logger.info(f"✅ Connected to GCS bucket: {GCS_BUCKET_NAME}")
-except Exception as e:
-    logger.warning(f"⚠️ Failed to initialize GCS client: {e}. Cache updates will remain local.")
+if storage is None:
     gcs_bucket = None
+else:
+    try:
+        gcs_client = storage.Client()
+        gcs_bucket = gcs_client.bucket(GCS_BUCKET_NAME)
+        logger.info(f"✅ Connected to GCS bucket: {GCS_BUCKET_NAME}")
+    except Exception as e:
+        logger.warning(
+            f"⚠️ Failed to initialize GCS client: {e}. Cache updates will remain local."
+        )
+        gcs_bucket = None
 
 # Ensure the cache directory exists at runtime
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -176,3 +194,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
