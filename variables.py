@@ -280,9 +280,14 @@ USER_INFO_API_URL = _get_str_env("USER_INFO_API_URL", "https://shary.eg/api/User
 CACHE_DIR = os.path.join(tempfile.gettempdir(), "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# ChromaDB persistence (ephemeral storage)
-CHROMA_PERSIST_DIR = os.path.join(tempfile.gettempdir(), "chroma_db")
-os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
+# ChromaDB persistence directory
+# Allow overriding via env so deployments can point at a mounted GCS bucket.
+_CHROMA_DIR_OVERRIDE = _get_str_env("CHROMA_PERSIST_DIR")
+if _CHROMA_DIR_OVERRIDE:
+    CHROMA_PERSIST_DIR = _CHROMA_DIR_OVERRIDE
+else:
+    CHROMA_PERSIST_DIR = os.path.join(tempfile.gettempdir(), "chroma_db")
+    os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
 LEADS_CACHE_FILE = "leads_cache.json"
 CONVERSATIONS_CACHE_FILE = "conversations_cache.json"
 UNITS_CACHE_FILE = "units.json"
@@ -303,6 +308,7 @@ SESSION_TIMEOUT = _get_int_env("SESSION_TIMEOUT", 3600)
 
 # Logging
 LOG_LEVEL = _get_str_env("LOG_LEVEL", "INFO")
+
 
 
 
