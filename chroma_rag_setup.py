@@ -5,7 +5,7 @@ import fcntl
 import shutil
 import logging
 import sqlite3
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import chromadb
 from chromadb.config import Settings
@@ -13,7 +13,7 @@ from chromadb.config import Settings
 import google.generativeai as genai
 from google.cloud import storage
 
-import variables  # لازم يحتوي GEMINI_API_KEY و CHROMA_PERSIST_DIR
+import variables  # يجب أن يحتوي GEMINI_API_KEY و CHROMA_PERSIST_DIR
 
 # =========================
 # Logging
@@ -32,76 +32,42 @@ try:
     gcs_bucket = gcs_client.bucket(GCS_BUCKET_NAME)
     logger.info(f"✅ Connected to GCS bucket: {GCS_BUCKET_NAME}")
 except Exception as e:
-    logger.warning(f"⚠️ Failed to initialize GCS client: {e}. Using local ChromaDB only.")
+    logger.error(f"❌ Failed to connect to GCS: {e}")
     gcs_bucket = None
 
-# =========================
-# Gemini API (Embeddings)
-# =========================
-os.environ["GEMINI_API_KEY"] = variables.GEMINI_API_KEY
-genai.configure(api_key=variables.GEMINI_API_KEY)
+class _StartupLock:
+    """Context manager to prevent concurrent ChromaDB startup."""
+    def __enter__(self):
+        self.lockfile = os.path.join(variables.CHROMA_PERSIST_DIR, ".startup.lock")
+        self.fd = open(self.lockfile, "w")
+        try:
+            fcntl.lockf(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except IOError:
+            raise RuntimeError("❌ ChromaDB startup already in progress (lock held).")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            fcntl.lockf(self.fd, fcntl.LOCK_UN)
+        finally:
+            self.fd.close()
+            try:
+                os.unlink(self.lockfile)
+            except OSError:
+                pass
 
 class GeminiEmbeddingFunction:
-    """Custom embedding function using Gemini 3072-dim embeddings (read-only querying)."""
-
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
+        self.model = genai.EmbeddingModel("models/embedding-001")
 
-    def name(self) -> str:
-        return "gemini-embedding-001"
-
-    def __call__(self, inputs: List[str]) -> List[List[float]]:
-        if not inputs:
-            return []
-        out: List[List[float]] = []
-        for text in inputs:
-            try:
-                result = genai.embed_content(
-                    model="models/gemini-embedding-001",
-                    content=str(text),
-                    task_type="SEMANTIC_SIMILARITY",
-                )
-                vec = result["embedding"]
-            except Exception as e:
-                logger.error(f"❌ Error generating embedding: {e}")
-                vec = [0.0] * 3072
-            out.append(vec)
-        return out
-
-    def embed(self, text: str) -> List[float]:
+    def __call__(self, texts: List[str]) -> List[List[float]]:
         try:
-            result = genai.embed_content(
-                model="models/gemini-embedding-001",
-                content=str(text),
-                task_type="SEMANTIC_SIMILARITY",
-            )
-            return result["embedding"]
+            result = self.model.get_embeddings(texts)
+            return [embedding.values for embedding in result]
         except Exception as e:
-            logger.error(f"❌ Error generating single embedding: {e}")
-            return [0.0] * 3072
-
-# =========================
-# Startup file lock
-# =========================
-CHROMA_INIT_LOCK = os.getenv("CHROMA_INIT_LOCK", "/tmp/chroma_init.lock")
-
-class _StartupLock:
-    def __enter__(self):
-        os.makedirs(os.path.dirname(CHROMA_INIT_LOCK), exist_ok=True)
-        self._f = open(CHROMA_INIT_LOCK, "w")
-        fcntl.flock(self._f, fcntl.LOCK_EX)
-        return self
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            fcntl.flock(self._f, fcntl.LOCK_UN)
-            self._f.close()
-        except Exception:
-            pass
-
-# =========================
-# RAG (READ-ONLY)
-# =========================
-_rag_instance = None
+            logger.error(f"❌ Embedding error: {e}")
+            raise
 
 class RealEstateRAG:
     """
@@ -130,6 +96,12 @@ class RealEstateRAG:
         # Persistent client على الديركتوري المحلي
         self.client = self._create_client_readonly(chroma_settings)
 
+        # أسماء وأيدي المجموعات قد تختلف (gemini أو legacy)
+        self.units_collection: Optional[Any] = None
+        self.units_collection_name: Optional[str] = None
+        self.new_launches_collection: Optional[Any] = None
+        self.new_launches_collection_name: Optional[str] = None
+
         # حمّل collections الموجودة فقط (بدون create)
         self._load_or_get_collections()
         self._read_only = True
@@ -157,20 +129,14 @@ class RealEstateRAG:
             logger.info("GCS not configured; using local ChromaDB if present.")
             return
 
-        # لو فيه ملفات محلّياً، ما ننزّلش
-        if os.path.isdir(self.persist_directory) and os.listdir(self.persist_directory):
-            logger.info(f"Local Chroma dir '{self.persist_directory}' already has files. Skipping GCS download.")
+        if os.listdir(self.persist_directory):
+            logger.info(f"📁 Local Chroma directory not empty: {self.persist_directory}")
             return
 
         try:
-            blobs = list(gcs_bucket.list_blobs(prefix=GCS_CHROMA_PREFIX))
-            if not blobs:
-                logger.warning(f"⚠️ No Chroma files found in gs://{GCS_BUCKET_NAME}/{GCS_CHROMA_PREFIX}")
-                return
-
+            blobs = gcs_bucket.list_blobs(prefix=GCS_CHROMA_PREFIX)
             downloaded = 0
             for blob in blobs:
-                # تجاهل “الدلائل” الوهمية
                 if blob.name.endswith("/"):
                     continue
                 rel = os.path.relpath(blob.name, GCS_CHROMA_PREFIX)
@@ -198,31 +164,87 @@ class RealEstateRAG:
                     f"Make sure Chroma files exist locally or in GCS. Details: {e}"
                 )
 
+    def _resolve_collection_handle(
+        self,
+        preferred_name: str,
+        fallback_name: str,
+        available_names: Optional[Set[str]] = None,
+    ) -> Tuple[Any, str]:
+        attempts: List[str] = []
+        if available_names is not None:
+            if preferred_name in available_names:
+                attempts.append(preferred_name)
+            if fallback_name in available_names:
+                attempts.append(fallback_name)
+        if not attempts:
+            attempts = [preferred_name, fallback_name]
+
+        last_exc: Optional[Exception] = None
+        tried: Set[str] = set()
+        for name in attempts:
+            if name in tried:
+                continue
+            tried.add(name)
+            try:
+                collection = self.client.get_collection(
+                    name=name,
+                    embedding_function=self.embedder,
+                )
+                if name != preferred_name:
+                    logger.info(
+                        "ℹ️ Falling back to legacy collection '%s' (preferred '%s' not found).",
+                        name,
+                        preferred_name,
+                    )
+                return collection, name
+            except Exception as exc:
+                last_exc = exc
+
+        attempted_names = ", ".join(attempts)
+        raise RuntimeError(
+            "❌ Chroma collection not found locally. "
+            "تأكد أن ملفات ChromaDB متاحة في المسار المحلي "
+            f"('{self.persist_directory}') أو تم تنزيلها من GCS. "
+            f"Tried collections: {attempted_names}."
+        ) from last_exc
+
     def _load_or_get_collections(self):
         with _StartupLock():
+            available_names: Optional[Set[str]] = None
             try:
-                self.units_collection = self.client.get_collection(
-                    name="real_estate_units",
-                    embedding_function=self.embedder,
-                )
-                self.new_launches_collection = self.client.get_collection(
-                    name="new_launches",
-                    embedding_function=self.embedder,
-                )
-                logger.info("✅ Loaded existing collections: real_estate_units, new_launches")
-            except Exception as e:
-                # متعمّد: لا نعمل create هنا نهائيًا
-                raise RuntimeError(
-                    "❌ Chroma collections not found locally. "
-                    "تأكد أن ملفات ChromaDB متاحة في المسار المحلي "
-                    f"('{self.persist_directory}') أو تم تنزيلها من GCS."
-                ) from e
+                available_names = {col.name for col in self.client.list_collections()}
+                logger.info("📚 Available Chroma collections: %s", sorted(available_names))
+            except Exception as exc:
+                logger.warning("⚠️ Unable to list existing Chroma collections: %s", exc)
+
+            units_collection, units_name = self._resolve_collection_handle(
+                preferred_name="real_estate_units_gemini",
+                fallback_name="real_estate_units",
+                available_names=available_names,
+            )
+            launches_collection, launches_name = self._resolve_collection_handle(
+                preferred_name="new_launches_gemini",
+                fallback_name="new_launches",
+                available_names=available_names,
+            )
+
+            self.units_collection = units_collection
+            self.units_collection_name = units_name
+            self.new_launches_collection = launches_collection
+            self.new_launches_collection_name = launches_name
+
+            logger.info(
+                "✅ Loaded existing collections: %s, %s",
+                self.units_collection_name,
+                self.new_launches_collection_name,
+            )
+
     # ---------- Utility ----------
     @property
     def is_read_only(self) -> bool:
         return getattr(self, "_read_only", False)
 
-    def get_collection_stats(self) -> Dict[str, int]:
+    def get_collection_stats(self) -> Dict[str, Union[int, str, None]]:
         """Return basic statistics about the loaded collections."""
         try:
             units_count = self.units_collection.count() if self.units_collection else 0
@@ -239,11 +261,13 @@ class RealEstateRAG:
             launches_count = 0
 
         return {
+            "units_collection_name": self.units_collection_name,
+            "new_launches_collection_name": self.new_launches_collection_name,
             "units_count": units_count,
             "new_launches_count": launches_count,
             "total_count": units_count + launches_count,
         }
-    # ---------- Utility ----------
+
     def _parse_int(self, value, default=None):
         try:
             if value is None:
@@ -265,68 +289,29 @@ class RealEstateRAG:
                 meta = {}
                 if results.get("metadatas") and results["metadatas"][0] and i < len(results["metadatas"][0]):
                     meta = results["metadatas"][0][i]
-                dist = None
-                if results.get("distances") and results["distances"][0] and i < len(results["distances"][0]):
-                    dist = results["distances"][0][i]
-                formatted.append({"document": doc, "metadata": meta, "distance": dist})
+                formatted.append({"document": doc, "metadata": meta})
         return formatted
 
-    # ---------- Search (read-only) ----------
-    def search_units(self, query: str, n_results: int = 20, filters: Dict = None) -> List[Dict]:
-        start = time.time()
-        where = None
-        if filters:
-            clauses = []
-            if filters.get("price_min") is not None:
-                clauses.append({"price_value": {"$gte": filters["price_min"]}})
-            if filters.get("price_max") is not None:
-                clauses.append({"price_value": {"$lte": filters["price_max"]}})
-            if clauses:
-                where = clauses[0] if len(clauses) == 1 else {"$and": clauses}
-
+    # ---------- Read-only API ----------
+    def query_units(self, query: str, n_results: int = 5) -> List[Dict]:
+        if not self.units_collection:
+            return []
         try:
-            res = self.units_collection.query(
-                query_texts=[query],
-                n_results=100,
-                where=where,
-                include=["metadatas", "distances", "documents"],
-            )
-            out = self._format_direct_results(res, n_results)
-            logger.info(f"✅ Units search returned {len(out)} items in {time.time()-start:.2f}s")
-            return out
+            results = self.units_collection.query(query_texts=[query], n_results=n_results)
+            return self._format_direct_results(results, n_results)
         except Exception as e:
-            logger.error(f"❌ Error searching units: {e}")
+            logger.error(f"❌ Query error (units): {e}")
             return []
 
-    def search_new_launches(self, query: str, n_results: int = 10, filters: Dict = None) -> List[Dict]:
-        start = time.time()
-        where = None
-        if filters:
-            clauses = []
-            if filters.get("price_min") is not None:
-                clauses.append({"price_value": {"$gte": filters["price_min"]}})
-            if filters.get("price_max") is not None:
-                clauses.append({"price_value": {"$lte": filters["price_max"]}})
-            if clauses:
-                where = clauses[0] if len(clauses) == 1 else {"$and": clauses}
-
-        try:
-            res = self.new_launches_collection.query(
-                query_texts=[query],
-                n_results=100,
-                where=where,
-                include=["metadatas", "distances", "documents"],
-            )
-            out = self._format_direct_results(res, n_results)
-            logger.info(f"✅ New launches search returned {len(out)} items in {time.time()-start:.2f}s")
-            return out
-        except Exception as e:
-            logger.error(f"❌ Error searching new launches: {e}")
+    def query_new_launches(self, query: str, n_results: int = 5) -> List[Dict]:
+        if not self.new_launches_collection:
             return []
-
-    # ---------- Block any write/creation methods ----------
-    def reset_collections(self):
-        raise RuntimeError("READ-ONLY MODE: reset_collections() is disabled.")
+        try:
+            results = self.new_launches_collection.query(query_texts=[query], n_results=n_results)
+            return self._format_direct_results(results, n_results)
+        except Exception as e:
+            logger.error(f"❌ Query error (new launches): {e}")
+            return []
 
     def store_units_in_chroma(self, *args, **kwargs):
         raise RuntimeError("READ-ONLY MODE: store_units_in_chroma() is disabled.")
@@ -337,6 +322,8 @@ class RealEstateRAG:
 # =========================
 # Singleton getter
 # =========================
+_rag_instance = None
+
 def get_rag_instance() -> "RealEstateRAG":
     global _rag_instance
     if _rag_instance is None:
@@ -356,7 +343,14 @@ def main():
     try:
         units_cnt = rag.units_collection.count()
         launches_cnt = rag.new_launches_collection.count()
-        logger.info(f"📊 Chroma stats — units: {units_cnt}, new_launches: {launches_cnt}, total: {units_cnt + launches_cnt}")
+        logger.info(
+            "📊 Chroma stats — %s: %s, %s: %s, total: %s",
+            rag.units_collection_name or "units",
+            units_cnt,
+            rag.new_launches_collection_name or "new_launches",
+            launches_cnt,
+            units_cnt + launches_cnt,
+        )
     except Exception as e:
         logger.error(f"❌ Failed to read collection counts: {e}")
 
