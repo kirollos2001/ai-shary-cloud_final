@@ -132,7 +132,7 @@ class RealEstateRAG:
 
         # حمّل collections الموجودة فقط (بدون create)
         self._load_or_get_collections()
-
+        self._read_only = True
         logger.info("✅ ChromaDB loaded with existing collections (READ-ONLY).")
 
     # ---------- GCS helpers ----------
@@ -217,7 +217,32 @@ class RealEstateRAG:
                     "تأكد أن ملفات ChromaDB متاحة في المسار المحلي "
                     f"('{self.persist_directory}') أو تم تنزيلها من GCS."
                 ) from e
+    # ---------- Utility ----------
+    @property
+    def is_read_only(self) -> bool:
+        return getattr(self, "_read_only", False)
 
+    def get_collection_stats(self) -> Dict[str, int]:
+        """Return basic statistics about the loaded collections."""
+        try:
+            units_count = self.units_collection.count() if self.units_collection else 0
+        except Exception as exc:
+            logger.error(f"❌ Failed to count units collection: {exc}")
+            units_count = 0
+
+        try:
+            launches_count = (
+                self.new_launches_collection.count() if self.new_launches_collection else 0
+            )
+        except Exception as exc:
+            logger.error(f"❌ Failed to count new launches collection: {exc}")
+            launches_count = 0
+
+        return {
+            "units_count": units_count,
+            "new_launches_count": launches_count,
+            "total_count": units_count + launches_count,
+        }
     # ---------- Utility ----------
     def _parse_int(self, value, default=None):
         try:
