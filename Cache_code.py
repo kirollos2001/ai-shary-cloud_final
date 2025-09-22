@@ -4,61 +4,18 @@ import logging
 import time
 import tempfile
 from filelock import FileLock
-from variables import (
-    CACHE_DIR,
-    UNITS_CACHE_FILE,
-    NEW_LAUNCHES_CACHE_FILE,
-    DEVELOPERS_CACHE_FILE,
-    LEADS_CACHE_FILE,
-    CONVERSATIONS_CACHE_FILE,
-)
+from variables import CACHE_DIR
 
-_GCS_IMPORT_ERROR = None
-
-try:
-    from google.cloud import storage
-except ImportError as exc:  # pragma: no cover - depends on optional dependency
-    storage = None  # type: ignore[assignment]
-    _GCS_IMPORT_ERROR = exc
-# =========================
-# Logging
-# =========================
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# If the optional google-cloud-storage dependency is missing, surface a clear warning
-if _GCS_IMPORT_ERROR:
-    logger.warning(
-        "⚠️ google-cloud-storage is not installed: %s. "
-        "Cache uploads to Google Cloud Storage will be skipped.",
-        _GCS_IMPORT_ERROR,
-    )
-
-# =========================
-# Google Cloud Storage Configuration
-# =========================
-GCS_BUCKET_NAME = "sharyai2025-cache"
-GCS_CACHE_PREFIX = "cache/"  # Path in GCS where cache files are stored
-
-# Initialize GCS client
-if storage is None:
-    gcs_bucket = None
-else:
-    try:
-        gcs_client = storage.Client()
-        gcs_bucket = gcs_client.bucket(GCS_BUCKET_NAME)
-        logger.info(f"✅ Connected to GCS bucket: {GCS_BUCKET_NAME}")
-    except Exception as e:
-        logger.warning(
-            f"⚠️ Failed to initialize GCS client: {e}. Cache updates will remain local."
-        )
-        gcs_bucket = None
+# ملاحظة: بلاش import من config/db_operations على مستوى الملف لتجنب circular imports
+# هنستورد جوّه الدوال بس عند الحاجة.
 
 # Ensure the cache directory exists at runtime
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Flag to skip any DB operations
-SKIP_DB_INIT = True
+# Flag to temporarily skip any DB operations (disabled by default)
+# Previously controlled via SKIP_DB_INIT env var; now always False
+SKIP_DB_INIT = False
+
 
 def _log_cache_length(filename):
     """Log the number of items stored in a cache file."""
@@ -67,89 +24,25 @@ def _log_cache_length(filename):
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            logger.info("Cache %s length: %s", filename, len(data))
+            logging.info("Cache %s length: %s", filename, len(data))
         except Exception as e:
-            logger.error("Failed to read %s: %s", fpath, e)
+            logging.error("Failed to read %s: %s", fpath, e)
     else:
-        logger.warning("%s not found at %s", filename, fpath)
+        logging.warning("%s not found at %s", filename, fpath)
 
 _log_cache_length("units.json")
 _log_cache_length("new_launches.json")
 
-def _upload_cache_to_gcs():
-    """Upload all files in CACHE_DIR to GCS."""
-    if not gcs_bucket:
-        logger.warning("⚠️ GCS client not initialized. Skipping cache upload to GCS.")
-        return
-    try:
-        for file in os.listdir(CACHE_DIR):
-            if file.endswith(".json"):  # Only upload JSON cache files
-                local_path = os.path.join(CACHE_DIR, file)
-                gcs_path = f"{GCS_CACHE_PREFIX}{file}"
-                _upload_to_gcs(local_path, gcs_path)
-        logger.info(
-            f"✅ Uploaded cache files from {CACHE_DIR} to gs://{GCS_BUCKET_NAME}/{GCS_CACHE_PREFIX}"
-        )
-    except Exception as e:
-        logger.error(f"❌ Failed to upload cache files to GCS: {e}")
-
-
-def _download_cache_from_gcs(filename: str) -> bool:
-    """Ensure a cache file is present locally by downloading it from GCS."""
-    if not gcs_bucket:
-        logger.warning(
-            f"⚠️ GCS client not initialized. Cannot download {filename} from bucket."
-        )
+def _db_config_ok():
+    """تأكد من توفر مفاتيح الـDB الأساسية قبل أي اتصال"""
+    required = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]
+    missing = [k for k in required if not os.getenv(k)]
+    if missing:
+        logging.warning(f"DB config missing keys: {missing} — skipping DB ops.")
         return False
-
-    gcs_path = f"{GCS_CACHE_PREFIX}{filename}"
-    local_path = os.path.join(CACHE_DIR, filename)
-    lock = FileLock(local_path + ".lock")
-
-    try:
-        with lock:
-            blob = gcs_bucket.blob(gcs_path)
-            if not blob.exists():
-                logger.warning(
-                    f"⚠️ Cache file {gcs_path} does not exist in GCS. Keeping local copy."
-                )
-                return False
-
-            fd, tmp_path = tempfile.mkstemp(dir=CACHE_DIR)
-            os.close(fd)
-            try:
-                blob.download_to_filename(tmp_path)
-                os.replace(tmp_path, local_path)
-                logger.info(
-                    f"✅ Downloaded cache file gs://{GCS_BUCKET_NAME}/{gcs_path} -> {local_path}"
-                )
-                _log_cache_length(filename)
-                return True
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-    except Exception as e:
-        logger.error(f"❌ Failed to download cache file {filename} from GCS: {e}")
-        return False
-
-
-def _upload_cache_to_gcs():
-    """Upload all files in CACHE_DIR to GCS."""
-    if not gcs_bucket:
-        logger.warning("⚠️ GCS client not initialized. Skipping cache upload to GCS.")
-        return
-    try:
-        for file in os.listdir(CACHE_DIR):
-            if file.endswith(".json"):  # Only upload JSON cache files
-                local_path = os.path.join(CACHE_DIR, file)
-                gcs_path = f"{GCS_CACHE_PREFIX}{file}"
-                _upload_to_gcs(local_path, gcs_path)
-        logger.info(f"✅ Uploaded cache files from {CACHE_DIR} to gs://{GCS_BUCKET_NAME}/{GCS_CACHE_PREFIX}")
-    except Exception as e:
-        logger.error(f"❌ Failed to upload cache files to GCS: {e}")
+    return True
 
 def save_to_cache(filename, data):
-    """Save data to a cache file and upload to GCS."""
     path = os.path.join(CACHE_DIR, filename)
     lock = FileLock(path + ".lock")
     try:
@@ -159,17 +52,14 @@ def save_to_cache(filename, data):
                 with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
                     json.dump(data, tmp_file, ensure_ascii=False, indent=2, default=str)
                 os.replace(tmp_path, path)
-                logger.info(f"✅ Saved to cache file: {path}")
-                # Upload the updated file to GCS
-                _upload_to_gcs(path, f"{GCS_CACHE_PREFIX}{filename}")
+                logging.info(f"✅ Saved to cache file: {path}")
             finally:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
     except Exception as e:
-        logger.error(f"❌ Failed to save {filename} to cache: {e}")
+        logging.error(f"❌ Failed to save {filename} to cache: {e}")
 
 def load_from_cache(filename):
-    """Load data from a cache file."""
     path = os.path.join(CACHE_DIR, filename)
     lock = FileLock(path + ".lock")
     if os.path.exists(path):
@@ -180,33 +70,31 @@ def load_from_cache(filename):
                         return json.load(f)
             except (UnicodeDecodeError, json.JSONDecodeError) as e:
                 if attempt == 0:
-                    logger.warning(f"Decode error in {filename}, retrying once: {e}")
+                    logging.warning(f"Decode error in {filename}, retrying once: {e}")
                     time.sleep(0.1)
                     continue
-                logger.error(f"JSON decode error in {filename}: {e}")
+                logging.error(f"JSON decode error in {filename}: {e}")
                 backup_path = path + f".corrupted_{int(time.time())}"
                 try:
                     os.replace(path, backup_path)
-                    logger.warning(f"Backed up corrupted JSON file to {backup_path}")
+                    logging.warning(f"Backed up corrupted JSON file to {backup_path}")
                 except Exception as e2:
-                    logger.error(f"Failed to backup corrupted JSON file: {e2}")
+                    logging.error(f"Failed to backup corrupted JSON file: {e2}")
                 return []
             except Exception as e:
-                logger.error(f"Unexpected error loading {filename}: {e}")
+                logging.error(f"Unexpected error loading {filename}: {e}")
                 return []
     return []
 
 def append_to_cache(filename, entry):
-    """Append a new entry to the cache file and upload to GCS."""
     path = os.path.join(CACHE_DIR, filename)
     data = load_from_cache(filename)
     data.append(entry)
     save_to_cache(filename, data)
 
-
 def upsert_to_cache(filename, entry, key_field):
     """
-    Insert or update an entry in cache based on a key field and upload to GCS.
+    Insert or update an entry in cache based on a key field.
     If an entry with the same key_field value exists, it will be updated.
     Otherwise, a new entry will be added.
     """
@@ -227,111 +115,252 @@ def upsert_to_cache(filename, entry, key_field):
 
     save_to_cache(filename, data)
 
-
-def _ensure_cache_from_gcs(filename: str) -> bool:
-    """Helper to hydrate a specific cache file from GCS when DB sync is disabled."""
-    if not SKIP_DB_INIT:
-        logger.info(
-            f"SKIP_DB_INIT is disabled. Skipping GCS download for {filename} (expecting DB sync)."
-        )
-        return False
-
-    success = _download_cache_from_gcs(filename)
-    if not success:
-        if os.path.exists(os.path.join(CACHE_DIR, filename)):
-            logger.info(
-                f"Using existing local cache for {filename} after failed GCS download."
-            )
-            return True
-        logger.warning(
-            f"⚠️ Cache file {filename} not found locally and failed to download from GCS."
-        )
-        return False
-    return True
-
+def enrich_units_with_names():
+    query = """
+    SELECT 
+        u.id, u.name_ar, u.reference_no, u.apartment_area, u.price, u.max_price,
+        u.installment_years, u.delivery_in,
+        u.Bedrooms, u.Bathrooms, u.garages, u.address, u.sale_type,
+        d.name_ar AS developer_name,
+        c.name_ar AS compound_name,
+        p.name_ar AS property_type_name,
+        f.name_ar AS finishing_type_name,
+        a.name_ar AS area_name,
+        ci.name_ar AS city_name,
+        co.name_ar AS country_name
+    FROM units u
+    LEFT JOIN developers d ON u.developer_id = d.id
+    LEFT JOIN compounds c ON u.compound_id = c.id
+    LEFT JOIN property_settings p ON u.property_id = p.id AND p.type = 'property'
+    LEFT JOIN property_settings f ON u.finishing_type_id = f.id AND f.type = 'types_finishing'
+    LEFT JOIN cities a ON u.area_id = a.id
+    LEFT JOIN countries co ON u.country_id = co.id
+    LEFT JOIN cities ci ON a.country_id = ci.country_id
+    WHERE u.status = 1
+    """
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping enrich_units_with_names DB fetch (SKIP_DB_INIT or DB config missing).")
+        return []
+    from db_operations import fetch_data
+    try:
+        logging.info("🔍 Fetching enriched units from database...")
+        units = fetch_data(query)
+        logging.info(f"✅ Fetched {len(units)} enriched units from DB")
+        if units:
+            logging.info(f"🔢 Example unit: {units[0]}")
+        return units
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch units: {e}")
+        return []
 
 def cache_units_from_db():
-    """Populate units cache. In cloud mode we rely on GCS instead of hitting MySQL."""
-    if _ensure_cache_from_gcs(UNITS_CACHE_FILE):
-        logger.info("✅ Units cache hydrated from GCS.")
-    else:
-        logger.warning("⚠️ Units cache not refreshed; using existing data if available.")
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping units DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("units.json", [])
+        return
+    from config import get_db_connection
+    cursor = None
+    connection = None
+    try:
+        logging.info("🔍 Fetching enriched units from database with compound names and media...")
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
 
+        cursor.execute("""
+            SELECT u.*, c.name_ar AS compound_name_ar, c.name_en AS compound_name_en,
+                   c.image AS compound_image, c.video AS compound_video
+            FROM units u
+            LEFT JOIN compounds c ON u.compound_id = c.id
+        """)
+        units = cursor.fetchall()
 
-def cache_new_launches_from_db():
-    """Populate new launches cache from the pre-generated GCS snapshot."""
-    if _ensure_cache_from_gcs(NEW_LAUNCHES_CACHE_FILE):
-        logger.info("✅ New launches cache hydrated from GCS.")
-    else:
-        logger.warning("⚠️ New launches cache not refreshed; using existing data if available.")
+        for unit in units:
+            if unit.get('image'):
+                unit['new_image'] = f"https://shary.eg/images/compounds/units/{unit['image']}"
+            elif unit.get('compound_image'):
+                unit['new_image'] = f"https://shary.eg/images/compounds/{unit['compound_image']}"
+            else:
+                unit['new_image'] = ""
 
+        save_to_cache("units.json", units)
+        logging.info(f"✅ Saved {len(units)} units to cache (with compound names, media, and new_image)")
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch units: {e}")
+        save_to_cache("units.json", [])
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 def cache_devlopers_from_db():
-    """Populate developers cache from GCS snapshot (no DB access in cloud mode)."""
-    if _ensure_cache_from_gcs(DEVELOPERS_CACHE_FILE):
-        logger.info("✅ Developers cache hydrated from GCS.")
-    else:
-        logger.warning("⚠️ Developers cache not refreshed; using existing data if available.")
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping developers DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("developers.json", [])
+        return
+    from db_operations import fetch_data
+    try:
+        developers = fetch_data("SELECT * FROM developers")
+        save_to_cache("developers.json", developers)
+        logging.info(f"✅ Saved {len(developers)} developers to cache")
+    except Exception as e:
+        logging.error(f"❌ Error caching developers: {e}")
 
+def cache_new_launches_from_db():
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping new launches DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("new_launches.json", [])
+        return
+    from db_operations import fetch_data
+    try:
+        new_launches_query = """
+        SELECT 
+            nl.*,
+            d.name_ar AS developer_name,
+            c.name_ar AS compound_name_ar,
+            c.name_en AS compound_name_en,
+            c.image AS compound_image,
+            c.video AS compound_video,
+            pt.name_ar AS property_type_name,
+            ci.name_ar AS city_name
+        FROM new_launches nl
+        LEFT JOIN compounds c ON nl.compound_id = c.id
+        LEFT JOIN developers d ON c.developer_id = d.id
+        LEFT JOIN property_settings pt ON c.property_id = pt.id AND pt.type = 'property'
+        LEFT JOIN cities ci ON c.area_id = ci.id
+        """
+        new_launches = fetch_data(new_launches_query)
+
+        for launch in new_launches:
+            if launch.get('image'):
+                launch['new_image'] = f"https://shary.eg/images/new_launch/{launch['image']}"
+            else:
+                launch['new_image'] = ""
+
+        save_to_cache("new_launches.json", new_launches)
+        logging.info(f"✅ Saved {len(new_launches)} new launches to cache (with compound names, media, and new_image)")
+    except Exception as e:
+        logging.error(f"❌ Error caching new launches: {e}")
 
 def cache_leads_from_db():
-    """Ensure leads cache exists locally (download snapshot when available)."""
-    if _ensure_cache_from_gcs(LEADS_CACHE_FILE):
-        logger.info("✅ Leads cache hydrated from GCS.")
-    else:
-        logger.info(
-            "ℹ️ Leads cache not downloaded from GCS. It will be created locally when leads arrive."
-        )
-
-
-def cache_conversations_from_db():
-    """Ensure conversations cache exists locally (download snapshot when available)."""
-    if _ensure_cache_from_gcs(CONVERSATIONS_CACHE_FILE):
-        logger.info("✅ Conversations cache hydrated from GCS.")
-    else:
-        logger.info(
-            "ℹ️ Conversations cache not downloaded from GCS. It will be created locally when needed."
-        )
-
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping leads DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("leads.json", [])
+        return
+    from db_operations import fetch_data
+    try:
+        leads = fetch_data("SELECT * FROM leads")
+        save_to_cache("leads.json", leads)
+        logging.info(f"✅ Cached {len(leads)} leads to leads.json")
+    except Exception as e:
+        logging.error(f"❌ Failed to cache leads: {e}")
 
 def sync_leads_to_db():
-    """Placeholder for DB sync (disabled in GCS-first deployments)."""
-    if SKIP_DB_INIT:
-        logger.info("⏭️ Skipping leads DB sync in GCS cache mode.")
-        return False
-    logger.warning(
-        "⚠️ Leads DB sync requested but SKIP_DB_INIT is False and no implementation is available."
-    )
-    return False
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping sync_leads_to_db (SKIP_DB_INIT or DB config missing).")
+        return
+    from db_operations import execute_query
+    leads = load_from_cache("leads_updates.json")
+    if not leads:
+        logging.info("⚠️ No new leads to sync.")
+        return
 
+    for lead in leads:
+        try:
+            user_id = lead.get("user_id")
+            existing = load_from_cache("leads.json")
+            match = next((l for l in existing if l.get("user_id") == user_id), None)
+
+            if match:
+                # UPDATE
+                fields = []
+                values = []
+                for field in ["name", "phone", "email", "property_preferences", "budget", "location", "property_type", "bedrooms", "bathrooms"]:
+                    if lead.get(field) not in [None, "", 0]:
+                        fields.append(f"{field} = %s")
+                        values.append(lead[field])
+                values.append(user_id)
+                update_query = f"UPDATE leads SET {', '.join(fields)} WHERE user_id = %s"
+                execute_query(update_query, tuple(values))
+            else:
+                # INSERT
+                insert_query = """
+                    INSERT INTO leads (user_id, name, phone, email, property_preferences, budget, location, property_type, bedrooms, bathrooms)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                values = (
+                    user_id,
+                    lead.get("name", ""),
+                    lead.get("phone", ""),
+                    lead.get("email", ""),
+                    lead.get("property_preferences", ""),
+                    lead.get("budget", 0),
+                    lead.get("location", ""),
+                    lead.get("property_type", ""),
+                    lead.get("bedrooms", 0),
+                    lead.get("bathrooms", 0),
+                )
+                execute_query(insert_query, values)
+
+        except Exception as e:
+            logging.error(f"❌ Failed to sync lead for user {lead.get('user_id')}: {e}")
+
+    save_to_cache("leads_updates.json", [])
+    logging.info(f"✅ Synced {len(leads)} leads to DB and cleared leads_updates.json")
+
+def cache_conversations_from_db():
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping conversations DB fetch (SKIP_DB_INIT or DB config missing).")
+        save_to_cache("conversations.json", [])
+        return
+    from db_operations import fetch_data
+    try:
+        conversations = fetch_data("SELECT * FROM conversations")
+        save_to_cache("conversations.json", conversations)
+        logging.info(f"✅ Cached {len(conversations)} conversations")
+    except Exception as e:
+        logging.error(f"❌ Failed to cache conversations: {e}")
 
 def sync_conversations_to_db():
-    """Placeholder for DB sync (disabled in GCS-first deployments)."""
-    if SKIP_DB_INIT:
-        logger.info("⏭️ Skipping conversations DB sync in GCS cache mode.")
-        return False
-    logger.warning(
-        "⚠️ Conversations DB sync requested but SKIP_DB_INIT is False and no implementation is available."
-    )
-    return False
+    if SKIP_DB_INIT or not _db_config_ok():
+        logging.info("⏭️ Skipping sync_conversations_to_db (SKIP_DB_INIT or DB config missing).")
+        return
+    from db_operations import execute_query
+    convos = load_from_cache("conversations_updates.json")
+    if not convos:
+        logging.info("⚠️ No new conversations to sync.")
+        return
 
-def main():
-    """Main function to demonstrate cache operations (for testing)."""
-    logger.info("🚀 Starting cache manager...")
-    # Example: Load and log cache contents
-    units = load_from_cache("units.json")
-    new_launches = load_from_cache("new_launches.json")
-    logger.info(f"📊 Cache stats: units={len(units)}, new_launches={len(new_launches)}")
-    # Example: Append a dummy entry and sync to GCS
-    dummy_unit = {"id": "test123", "name_en": "Test Unit", "name_ar": "وحدة اختبار"}
-    append_to_cache("units.json", dummy_unit)
-    logger.info("✅ Appended dummy unit and synced to GCS")
-    # Example: Upsert a dummy entry and sync to GCS
-    dummy_launch = {"id": "launch123", "name_en": "Test Launch", "name_ar": "إطلاق اختبار"}
-    upsert_to_cache("new_launches.json", dummy_launch, "id")
-    logger.info("✅ Upserted dummy launch and synced to GCS")
+    for convo in convos:
+        try:
+            insert_query = """
+                INSERT INTO conversations (
+                    conversation_id, user_id, description, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    description = VALUES(description),
+                    updated_at = VALUES(updated_at)
+            """
+            values = (
+                convo.get("conversation_id"),
+                convo.get("user_id"),
+                json.dumps(convo.get("description", []), ensure_ascii=False),
+                convo.get("created_at"),
+                convo.get("updated_at")
+            )
+            print("CREATED AT:", convo.get("created_at"))
+            print("UPDATED AT:", convo.get("updated_at"))
 
-if __name__ == "__main__":
-    main()
+            execute_query(insert_query, values)
+        except Exception as e:
+            logging.error(f"❌ Failed to sync conversation: {e}")
 
-
+    save_to_cache("conversations_updates.json", [])
+    logging.info(f"✅ Synced {len(convos)} conversations to DB and cleared conversations_updates.json")
