@@ -1064,19 +1064,6 @@ def initialize_chromadb_for_cloud():
         logging.info("🔄 Initializing ChromaDB collections for Google Cloud deployment...")
         from chroma_rag_setup import get_rag_instance
         rag = get_rag_instance()
-        if getattr(rag, "is_read_only", False):
-            try:
-                stats = rag.get_collection_stats()
-                logging.info(
-                    "📊 ChromaDB already available (read-only). "
-                    f"Units: {stats.get('units_count', 0)}, "
-                    f"New launches: {stats.get('new_launches_count', 0)}, "
-                    f"Total: {stats.get('total_count', 0)}"
-                )
-            except Exception as stats_error:
-                logging.warning(f"⚠️ Unable to fetch Chroma stats in read-only mode: {stats_error}")
-            logging.info("✅ Skipping Chroma rebuild because pre-generated embeddings are being used from GCS.")
-            return True
         units_data = Cache_code.load_from_cache("units.json")
         new_launches_data = Cache_code.load_from_cache("new_launches.json")
         logging.info(f"📊 Loaded {len(units_data)} units and {len(new_launches_data)} new launches from cache")
@@ -1093,9 +1080,6 @@ def initialize_chromadb_for_cloud():
         )
         return True
     except Exception as e:
-        if isinstance(e, RuntimeError) and "READ-ONLY MODE" in str(e).upper():
-            logging.info("✅ Detected Chroma read-only runtime error; treating as successful initialization.")
-            return Tru
         logging.error(f"❌ Error initializing ChromaDB for cloud deployment: {e}")
         if 'rag' in locals():
             try:
